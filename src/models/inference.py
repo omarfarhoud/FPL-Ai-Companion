@@ -162,7 +162,7 @@ def main():
     import sys
 
     repo_src = Path(__file__).resolve().parents[1]
-    dataset_path = repo_src / 'data' / 'cleaned' / 'final_prepared_dataset.csv'
+    dataset_path = repo_src / 'data' / 'raw' / 'cleaned_merged_seasons.csv'
     model_path = Path(__file__).parent / 'linear_model.joblib'
     features_path = Path(__file__).parent / 'features.json'
 
