@@ -1,0 +1,67 @@
+// Find players with incorrect Defender position assignments
+// A player has an incorrect Defender position if their actual score doesn't match
+// what they would have scored as a Defender according to FPL scoring rules
+
+MATCH (p:Player)-[:PLAYS_AS]->(pos:Position)
+WITH p, collect(pos.name) AS positions
+WHERE size(positions) = 2 AND 'DEF' IN positions
+
+MATCH (p)-[played:PLAYED_IN]->(f:Fixture)
+MATCH (f)<-[:HAS_FIXTURE]-(gw:Gameweek)<-[:HAS_GW]-(s:Season)
+
+// Calculate what the score would be if player was a Defender
+WITH p, s, f, played,
+  // General scoring (all positions)
+  COALESCE(played.assists, 0) * 3 +
+  CASE 
+    WHEN played.minutes > 0 AND played.minutes < 60 THEN 1
+    WHEN played.minutes >= 60 THEN 2
+    ELSE 0
+  END +
+  COALESCE(played.penalties_missed, 0) * -2 +
+  COALESCE(played.own_goals, 0) * -2 +
+  COALESCE(played.yellow_cards, 0) * -1 +
+  COALESCE(played.red_cards, 0) * -3 +
+  
+  // Defender-specific scoring
+  COALESCE(played.goals_scored, 0) * 6 +  // Defenders get 6 per goal
+  CASE 
+    WHEN played.minutes >= 60 AND COALESCE(played.clean_sheets, 0) > 0 THEN 4
+    ELSE 0
+  END +
+  toInteger(floor(toFloat(COALESCE(played.goals_conceded, 0)) / 2.0)) * -1  // -1 per 2 goals conceded
+  
+  AS def_score
+
+// Check if defender score matches actual score
+WITH p, s, f, played, def_score,
+  CASE 
+    WHEN def_score = played.total_points THEN true
+    ELSE false
+  END AS matches_def
+
+// Count total fixtures and incorrect fixtures per player
+WITH p.player_name AS player,
+  count(f) AS total_fixtures,
+  sum(CASE WHEN NOT matches_def THEN 1 ELSE 0 END) AS not_def_fixtures,
+  collect(
+    CASE 
+      WHEN NOT matches_def THEN {
+        def_score: def_score,
+        season: s.season_name,
+        fixture_number: f.fixture_number,
+        matches_def: matches_def,
+        total_points: played.total_points
+      }
+      ELSE null
+    END
+  ) AS all_fixtures
+
+// Filter out null values and only return players with incorrect fixtures
+WITH player, total_fixtures, not_def_fixtures,
+  [fixture IN all_fixtures WHERE fixture IS NOT null] AS fixture_details
+
+WHERE not_def_fixtures > 0
+
+RETURN player, not_def_fixtures, total_fixtures, fixture_details
+ORDER BY player
