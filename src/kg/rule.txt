@@ -11,27 +11,32 @@ MATCH (f)<-[:HAS_FIXTURE]-(gw:Gameweek)<-[:HAS_GW]-(s:Season)
 
 // Calculate what the score would be if player was a Defender
 WITH p, s, f, played,
-  // General scoring (all positions)
-  COALESCE(played.assists, 0) * 3 +
-  CASE 
-    WHEN played.minutes > 0 AND played.minutes < 60 THEN 1
-    WHEN played.minutes >= 60 THEN 2
-    ELSE 0
-  END +
-  COALESCE(played.penalties_missed, 0) * -2 +
-  COALESCE(played.own_goals, 0) * -2 +
-  COALESCE(played.yellow_cards, 0) * -1 +
-  COALESCE(played.red_cards, 0) * -3 +
-  
-  // Defender-specific scoring
-  COALESCE(played.goals_scored, 0) * 6 +  // Defenders get 6 per goal
-  CASE 
-    WHEN played.minutes >= 60 AND COALESCE(played.clean_sheets, 0) > 0 THEN 4
-    ELSE 0
-  END +
-  toInteger(floor(toFloat(COALESCE(played.goals_conceded, 0)) / 2.0)) * -1  // -1 per 2 goals conceded
-  
-  AS def_score
+  (
+    // General scoring
+    COALESCE(played.assists, 0) * 3 +
+    // Minutes: < 60 mins = 1 pt, >= 60 mins = 2 pts (if mins > 0)
+    CASE 
+      WHEN played.minutes > 0 AND played.minutes < 60 THEN 1
+      WHEN played.minutes >= 60 THEN 2
+      ELSE 0
+    END +
+    COALESCE(played.penalties_missed, 0) * -2 +
+    COALESCE(played.own_goals, 0) * -2 +
+    COALESCE(played.yellow_cards, 0) * -1 +
+    COALESCE(played.red_cards, 0) * -3 +
+    // *** CRITICAL ADDITION: Bonus points are part of total_points ***
+    COALESCE(played.bonus, 0) + 
+
+    // Defender-specific scoring
+    COALESCE(played.goals_scored, 0) * 6 +  
+    // Clean sheets (only if played > 60 mins) [cite: 109]
+    CASE 
+      WHEN played.minutes >= 60 AND COALESCE(played.clean_sheets, 0) > 0 THEN 4
+      ELSE 0
+    END +
+    // Goals conceded (-1 per 2 goals) [cite: 108]
+    toInteger(floor(toFloat(COALESCE(played.goals_conceded, 0)) / 2.0)) * -1
+  ) AS def_score
 
 // Check if defender score matches actual score
 WITH p, s, f, played, def_score,

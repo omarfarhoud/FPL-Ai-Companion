@@ -157,12 +157,20 @@ if __name__ == "__main__":
     builder = FPLGraphBuilder()
     try:
         builder.setup_constraints()
-        # Use the exact filename you provided
-        csv_file = "C:/Users/omarf/FPL-Ai-Companion/src/kg/fpl_two_seasons.csv" 
-        if os.path.exists(csv_file):
-            builder.load_data(csv_file)
+        
+        # 1. Get the directory where this script is located
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        
+        # 2. Look for the CSV in that SAME directory
+        # Ensure this filename matches what you submit!
+        csv_filename = "fpl_two_seasons.csv" 
+        csv_path = os.path.join(base_path, csv_filename)
+        
+        if os.path.exists(csv_path):
+            builder.load_data(csv_path)
             print("Knowledge Graph construction complete.")
         else:
-            print(f"Error: File {csv_file} not found.")
+            print(f"Error: File {csv_filename} not found in {base_path}.")
+            print("Please ensure the CSV file is in the same directory as this script.")
     finally:
         builder.close()
