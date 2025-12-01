@@ -29,12 +29,12 @@ WITH p, s, f, played,
 
     // Defender-specific scoring
     COALESCE(played.goals_scored, 0) * 6 +  
-    // Clean sheets (only if played > 60 mins) [cite: 109]
+    // Clean sheets (only if played > 60 mins)
     CASE 
       WHEN played.minutes >= 60 AND COALESCE(played.clean_sheets, 0) > 0 THEN 4
       ELSE 0
     END +
-    // Goals conceded (-1 per 2 goals) [cite: 108]
+    // Goals conceded (-1 per 2 goals)
     toInteger(floor(toFloat(COALESCE(played.goals_conceded, 0)) / 2.0)) * -1
   ) AS def_score
 
@@ -62,11 +62,12 @@ WITH p.player_name AS player,
     END
   ) AS all_fixtures
 
-// Filter out null values and only return players with incorrect fixtures
+// Filter out null values and return ALL suspects (even if 0 errors)
 WITH player, total_fixtures, not_def_fixtures,
   [fixture IN all_fixtures WHERE fixture IS NOT null] AS fixture_details
 
-WHERE not_def_fixtures > 0
+// REMOVED: WHERE not_def_fixtures > 0 
+// This ensures Stones and Azpi show up with 0 errors.
 
 RETURN player, not_def_fixtures, total_fixtures, fixture_details
 ORDER BY player
