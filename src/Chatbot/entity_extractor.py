@@ -4,12 +4,31 @@ import torch
 import platform
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# --- Lookup / Regex lists with examples ---
-PLAYERS = ["Salah", "Haaland", "Son", "Watkins", "Saka", "Foden", "Pickford", "Raya", "Fernandes", "Kane"]
-TEAMS = ["Liverpool", "Arsenal", "Man City", "Tottenham", "Chelsea", "Newcastle", "Brighton", "Man United"]
+# --- Lookup / Regex lists with common player LAST NAMES and partial matches ---
+PLAYERS = [
+    # Common search terms (last names)
+    "Salah", "Haaland", "Kane", "Son", "Saka", "Foden", "De Bruyne", 
+    "Fernandes", "Rashford", "Watkins", "Isak", "Palmer", "Bowen",
+    "Trent", "Alexander-Arnold", "Robertson", "Walker", "Trippier",
+    "Pickford", "Raya", "Alisson", "Ederson", "Pope",
+    # Full names if user types them
+    "Mohamed Salah", "Erling Haaland", "Harry Kane", "Heung-Min Son",
+    "Bruno Fernandes", "Kevin De Bruyne", "Phil Foden", "Bukayo Saka"
+]
+
+TEAMS = ["Liverpool", "Arsenal", "Man City", "Manchester City", "Tottenham", 
+         "Chelsea", "Newcastle", "Brighton", "Man United", "Manchester United",
+         "Aston Villa", "West Ham", "Fulham", "Wolves", "Everton", "Brentford"]
+
 POSITIONS = ["GK", "Goalkeeper", "GKP", "Defender", "Defenders", "DEF",
              "Midfielder", "Midfielders", "MID", "Forward", "Forwards", "FWD"]
-METRICS = ["goals", "assists", "points", "bonus points", "clean sheets", "ICT index", "minutes played", "fixtures", "form"]
+
+METRICS = ["goals", "assists", "points", "bonus points", "clean sheets", 
+           "ICT index", "minutes played", "fixtures", "form", "value"]
+
+# Budget pattern - captures "under X", "<X", "below X", etc.
+BUDGET_PATTERN = r'(?:under|below|less than|<|maximum|max)\s*[£$]?\s*(\d+\.?\d*)\s*(?:m|million)?'
+
 GAMEWEEKS = [f"GW{i}" for i in range(1, 39)]
 SEASON_PATTERN = r"\b(20\d{2})[-/](\d{2})\b"
 
@@ -21,9 +40,9 @@ POSITION_MAP = {
     "midfielders": "Midfielder",
     "forward": "Forward",
     "forwards": "Forward",
-    "goalkeeper": "GK",
-    "gkp": "GK",
-    "gk": "GK",
+    "goalkeeper": "Goalkeeper",
+    "gkp": "Goalkeeper",
+    "gk": "Goalkeeper",
     "def": "Defender",
     "mid": "Midfielder",
     "fwd": "Forward"
@@ -38,7 +57,8 @@ METRIC_MAP = {
     "ict index": "ICT index",
     "minutes played": "minutes played",
     "fixtures": "team",
-    "form": "form"
+    "form": "form",
+    "value": "value"
 }
 
 
@@ -55,7 +75,7 @@ class HybridEntityExtractor:
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            device_map=None,  # no auto device mapping
+            device_map=None,
             torch_dtype=torch.float16 if not is_windows else None,
             local_files_only=False
         )
@@ -72,11 +92,11 @@ class HybridEntityExtractor:
         query_norm = query.lower()
 
         # --- Regex / Lookup extraction ---
-        found_players = [p for p in PLAYERS if re.search(rf"\b{p}\b", query, re.I)]
+        found_players = [p for p in PLAYERS if re.search(rf"\b{re.escape(p)}\b", query, re.I)]
         if found_players:
             entities["player"] = found_players
 
-        found_teams = [t for t in TEAMS if re.search(rf"\b{t}\b", query, re.I)]
+        found_teams = [t for t in TEAMS if re.search(rf"\b{re.escape(t)}\b", query, re.I)]
         if found_teams:
             entities["team"] = found_teams
 
@@ -95,6 +115,11 @@ class HybridEntityExtractor:
         found_seasons = re.findall(SEASON_PATTERN, query)
         if found_seasons:
             entities["season"] = [f"{y1}-{y2}" for y1, y2 in found_seasons]
+        
+        # Extract budget constraints
+        budget_match = re.search(BUDGET_PATTERN, query, re.I)
+        if budget_match:
+            entities["budget"] = [budget_match.group(1)]
 
         # --- LLM fallback for missing entities ---
         required_keys = ["player", "team", "position", "metric", "season", "gameweek"]
@@ -113,7 +138,7 @@ class HybridEntityExtractor:
         system_prompt = """You are an entity extractor for Fantasy Premier League (FPL).
 
 Extract the following entities from the user's query:
-- player: any player mentioned
+- player: any player mentioned (use last names like "Salah", "Haaland", "Kane")
 - team: any team mentioned
 - position: goalkeepers, defenders, midfielders, forwards, etc.
 - metric: stats like goals, assists, points, bonus points, clean sheets, ICT index, minutes played, form, fixtures
@@ -123,8 +148,9 @@ Extract the following entities from the user's query:
 Rules:
 1. Only output entities that appear in the query.
 2. Output exactly a JSON object. Do NOT invent players, teams, or metrics.
-3. If an entity is not mentioned, omit it.
-4. Do NOT include explanations or extra text."""
+3. For players, extract last names (e.g., "Salah" not "Mohamed Salah")
+4. If an entity is not mentioned, omit it.
+5. Do NOT include explanations or extra text."""
 
         examples_text = """
 User: How many goals did Salah score?
@@ -151,7 +177,7 @@ Assistant: {"player": ["Saka"], "season": ["2022-23"], "metric": ["stats"]}
         generated_ids = self.model.generate(
             **inputs,
             max_new_tokens=64,
-            do_sample=False  # deterministic output for JSON
+            do_sample=False
         )
 
         generated_only = generated_ids[0, inputs.input_ids.shape[1]:]
@@ -186,9 +212,10 @@ Assistant: {"player": ["Saka"], "season": ["2022-23"], "metric": ["stats"]}
 if __name__ == "__main__":
     extractor = HybridEntityExtractor(model_size="1.5B")
     test_queries = [
+        "How many goals did Salah score?",
+        "Compare Haaland and Kane",
         "Stats for Mount in 2022-23 season",
         "Top midfielders for Chelsea in GW12",
-        "2022/23 season stats for Saka",
         "Best goalkeepers under 5m?",
         "Who scored most goals for Liverpool?",
         "Clean sheets for Man City defenders?"
