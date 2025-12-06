@@ -1,33 +1,36 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+import platform
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 class IntentClassifier:
-    def __init__(self, model_size="3B"):
-        # Model selection
-        if model_size == "1.5B":
-            model_id = "Qwen/Qwen2.5-1.5B-Instruct"
-        else:
-            model_id = "Qwen/Qwen2.5-3B-Instruct"
-            
+    def __init__(self):
+        # ----------------------------
+        # Model selection: Qwen2.5-1.5B
+        # ----------------------------
+        model_id = "Qwen/Qwen2.5-1.5B-Instruct"
         print(f"Loading {model_id}...")
 
-        # 4-bit quantization config
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16
-        )
+        is_windows = platform.system() == "Windows"
 
-        # Load tokenizer and model
+        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+        # Load model
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            quantization_config=bnb_config,
-            device_map="auto"
+            device_map=None,
+            torch_dtype=torch.float16 if not is_windows else None,
+            local_files_only=False
         )
-        print(f"✔ {model_id} loaded successfully.")
 
-        # Valid intents
+        # Move to device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        print(f"✔ {model_id} loaded on {self.device}.")
+
+        # ----------------------------
+        # Intents
+        # ----------------------------
         self.valid_intents = [
             "get_player_stats",
             "compare_players",
@@ -37,123 +40,173 @@ class IntentClassifier:
             "unknown"
         ]
 
-        # System prompt
-        self.system_prompt = f"""You are a helpful assistant for Fantasy Premier League (FPL).
-        Classify the user's query into EXACTLY one of these intents: {self.valid_intents}.
-        Output ONLY the intent name. Do not output anything else."""
+        # ----------------------------
+        # Optimized system prompt
+        # ----------------------------
+        self.system_prompt = f"""
+You are a helpful Fantasy Premier League (FPL) assistant. Classify the user's query into **exactly one** of these intents:
 
-        # Examples: 3–4 per intent
+{self.valid_intents}
+
+Instructions:
+- Output **ONLY** the intent name exactly as listed above.
+- Never invent new intent names.
+- If the query does not match any of the above intents, always output 'unknown'.
+- Match the format of the examples exactly.
+"""
+
+        # ----------------------------
+        # Expanded few-shot examples
+        # ----------------------------
         self.examples_text = """
-        User: How many points did Haaland get last week?
-        Assistant: get_player_stats
-        User: How many goals does Salah have?
-        Assistant: get_player_stats
-        User: Show me Watkins’ recent stats.
-        Assistant: get_player_stats
-        User: Should I start Pickford or Raya?
-        Assistant: compare_players
-        User: Who is better, Saka or Foden?
-        Assistant: compare_players
-        User: Pick one: Alvarez or Solanke.
-        Assistant: compare_players
-        User: Suggest a defender under 4.5m.
-        Assistant: get_recommendation
-        User: Who is the best captain for GW12?
-        Assistant: get_recommendation
-        User: I need a replacement for Trent.
-        Assistant: get_recommendation
-        User: How are Arsenal performing recently?
-        Assistant: team_analysis
-        User: Which team has the most clean sheets?
-        Assistant: team_analysis
-        User: Are Liverpool strong defensively right now?
-        Assistant: team_analysis
-        User: Who does Liverpool play next?
-        Assistant: fixture_query
-        User: Does Man City have a double gameweek?
-        Assistant: fixture_query
-        User: What are the easiest fixtures coming up?
-        Assistant: fixture_query
-        User: What is the capital of France?
-        Assistant: unknown
-        User: Translate this to Spanish.
-        Assistant: unknown
-        User: Explain quantum computing.
-        Assistant: unknown
-        """
+User: How many points did Haaland get last week?
+Assistant: get_player_stats
+User: How many goals does Salah have?
+Assistant: get_player_stats
+User: Show me Watkins’ recent stats.
+Assistant: get_player_stats
+User: What is Fernandes' current form like?
+Assistant: get_player_stats
 
-        # Pre-apply chat template once
-        self.static_input_ids = self.tokenizer.apply_chat_template(
+User: Should I start Pickford or Raya?
+Assistant: compare_players
+User: Who is better, Saka or Foden?
+Assistant: compare_players
+User: Pick one: Alvarez or Solanke.
+Assistant: compare_players
+User: Is Antonio better than Jimenez for this week?
+Assistant: compare_players
+
+User: Suggest a defender under 4.5m.
+Assistant: get_recommendation
+User: Who is the best captain for GW12?
+Assistant: get_recommendation
+User: I need a replacement for Trent.
+Assistant: get_recommendation
+User: Recommend a midfielder under 5.0m
+Assistant: get_recommendation
+User: Suggest a cheap forward for my team
+Assistant: get_recommendation
+
+User: How are Arsenal performing recently?
+Assistant: team_analysis
+User: Which team has the most clean sheets?
+Assistant: team_analysis
+User: Are Liverpool strong defensively right now?
+Assistant: team_analysis
+User: How is Chelsea performing after their last three matches?
+Assistant: team_analysis
+User: Are Tottenham improving this season?
+Assistant: team_analysis
+
+User: Who does Liverpool play next?
+Assistant: fixture_query
+User: Does Man City have a double gameweek?
+Assistant: fixture_query
+User: What are the easiest fixtures coming up?
+Assistant: fixture_query
+User: Who does Brighton face next GW?
+Assistant: fixture_query
+User: Which teams have easy fixtures in the next two GWs?
+Assistant: fixture_query
+
+User: What is the capital of France?
+Assistant: unknown
+User: Translate this to Spanish.
+Assistant: unknown
+User: Explain quantum computing.
+Assistant: unknown
+User: What's the weather like in London?
+Assistant: unknown
+User: How do I cook pasta?
+Assistant: unknown
+User: Who won the 2018 World Cup?
+Assistant: unknown
+User: Tell me a joke
+Assistant: unknown
+User: What is the population of Japan?
+Assistant: unknown
+"""
+
+        # ----------------------------
+        # Pre-tokenize base prompt once
+        # ----------------------------
+        base_prompt_text = self.tokenizer.apply_chat_template(
             [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": self.examples_text}
-            ],
-            tokenize=True,   # now we pre-tokenize
-            add_generation_prompt=True
-        )
-
-    def predict(self, user_query):
-        # Append the user query only
-        text = self.tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": self.examples_text + f"\nUser: {user_query}"}
             ],
             tokenize=False,
             add_generation_prompt=True
         )
 
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+        self.base_ids = self.tokenizer(
+            base_prompt_text,
+            return_tensors="pt",
+            padding=True
+        ).input_ids.to(self.device)
 
-        generated_ids = self.model.generate(
-            **model_inputs,
-            max_new_tokens=10,
-            temperature=0.1
+    # ----------------------------
+    # Optimized prediction
+    # ----------------------------
+    def predict(self, user_query):
+        user_line = f"User: {user_query}\nAssistant:"
+
+        new_ids = self.tokenizer(
+            user_line,
+            return_tensors="pt",
+            padding=True
+        ).input_ids.to(self.device)
+
+        model_inputs = torch.cat([self.base_ids, new_ids], dim=1)
+
+        outputs = self.model.generate(
+            input_ids=model_inputs,
+            attention_mask=torch.ones_like(model_inputs),
+            max_new_tokens=5,
+            do_sample=False  # greedy decoding
         )
 
-        # Decode
-        generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-        ]
-        response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        generated_only = outputs[0, model_inputs.shape[1]:]
 
-        return response.strip()
-        # --- Test Block ---
+        raw_output = self.tokenizer.decode(
+            generated_only,
+            skip_special_tokens=True
+        ).strip()
+
+        # Map to valid intents (fallback to 'unknown')
+        intent = next((i for i in self.valid_intents if i in raw_output), "unknown")
+        return intent
+
+
+# ----------------------------
+# TEST BLOCK
+# ----------------------------
 if __name__ == "__main__":
-    classifier = IntentClassifier(model_size="3B") 
+    classifier = IntentClassifier()
 
     test_queries = [
-        # get_player_stats
         "How many assists did Son have last gameweek?",
         "Show me Kane's total points this season.",
         "What is Fernandes' current form like?",
-
-        # compare_players
         "Who should I pick: De Bruyne or Mount?",
         "Is Antonio better than Jimenez for this week?",
         "Between Cancelo and Alexander-Arnold, who is safer?",
-
-        # get_recommendation
         "I need a cheap midfielder under 5.5m.",
         "Who should I captain this week?",
         "Suggest a good budget forward for my team.",
-
-        # team_analysis
         "How is Chelsea performing after their last three matches?",
         "Which team has the best defensive record currently?",
         "Are Tottenham improving this season?",
-
-        # fixture_query
         "Who does Brighton face next GW?",
         "Does Liverpool have a double gameweek soon?",
         "Which teams have easy fixtures in the next two GWs?",
-
-        # unknown
         "What's the weather like in London?",
         "How do I cook pasta?",
         "Who won the World Cup in 1998?"
     ]
 
-    print("\n--- Testing Qwen2.5 ---")
+    print("\n--- Testing Qwen2.5-1.5B with fully optimized prompt ---")
     for q in test_queries:
-        print(f"Query: '{q}'\nIntent: {classifier.predict(q)}\n")
+        intent = classifier.predict(q)
+        print(f"Query: '{q}'\nIntent: {intent}\n")
