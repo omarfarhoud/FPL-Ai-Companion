@@ -35,6 +35,7 @@ class IntentClassifier:
             "get_player_stats",
             "compare_players",
             "get_recommendation",
+            "get_leaderboard",
             "team_analysis",
             "fixture_query",
             "unknown"
@@ -76,6 +77,10 @@ User: Pick one: Alvarez or Solanke.
 Assistant: compare_players
 User: Is Antonio better than Jimenez for this week?
 Assistant: compare_players
+User: Compare Haaland and Kane's performance
+Assistant: compare_players
+User: Compare Son vs Salah this season
+Assistant: compare_players
 
 User: Suggest a defender under 4.5m.
 Assistant: get_recommendation
@@ -87,6 +92,21 @@ User: Recommend a midfielder under 5.0m
 Assistant: get_recommendation
 User: Suggest a cheap forward for my team
 Assistant: get_recommendation
+User: Find me forwards in good form under 8 million
+Assistant: get_recommendation
+User: Show me budget defenders
+Assistant: get_recommendation
+
+User: Who are the top 3 goal scorers?
+Assistant: get_leaderboard
+User: Show me the best point scorers this season
+Assistant: get_leaderboard
+User: Which players have the most assists?
+Assistant: get_leaderboard
+User: Who are the highest scoring midfielders?
+Assistant: get_leaderboard
+User: Top 5 defenders by points
+Assistant: get_leaderboard
 
 User: How are Arsenal performing recently?
 Assistant: team_analysis
@@ -150,6 +170,41 @@ Assistant: unknown
     # Optimized prediction
     # ----------------------------
     def predict(self, user_query):
+        # Rule-based fallback for common patterns
+        query_lower = user_query.lower()
+        
+        # Comparison patterns
+        if 'compare' in query_lower or ' vs ' in query_lower or ' versus ' in query_lower:
+            return "compare_players"
+        
+        # Recommendation patterns (find/suggest/recommend + position/budget)
+        if any(keyword in query_lower for keyword in ['find', 'suggest', 'recommend', 'show me', 'need']):
+            if any(indicator in query_lower for indicator in [
+                'forward', 'midfielder', 'defender', 'goalkeeper', 'under', 'budget',
+                'cheap', 'value', 'replacement', 'captain'
+            ]):
+                return "get_recommendation"
+        
+        # Team analysis patterns (check BEFORE leaderboard)
+        if any(keyword in query_lower for keyword in ['team', 'teams', 'club', 'clubs', 'side']):
+            if any(pattern in query_lower for pattern in [
+                'clean sheet', 'defensive', 'performing', 'form', 'strong', 'weak',
+                'improving', 'struggling'
+            ]):
+                return "team_analysis"
+        
+        # Leaderboard patterns (for PLAYERS)
+        if any(pattern in query_lower for pattern in [
+            'top', 'best', 'most', 'highest', 'leading', 'leaderboard',
+            'who scored', 'who has', 'which player'
+        ]) and any(stat in query_lower for stat in [
+            'goal', 'assist', 'point', 'scorer', 'score'
+        ]):
+            # Make sure it's not about teams
+            if not any(keyword in query_lower for keyword in ['team', 'teams', 'club', 'clubs']):
+                return "get_leaderboard"
+        
+        # Continue with LLM-based classification
         user_line = f"User: {user_query}\nAssistant:"
 
         new_ids = self.tokenizer(

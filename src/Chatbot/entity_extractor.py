@@ -23,7 +23,7 @@ TEAMS = ["Liverpool", "Arsenal", "Man City", "Manchester City", "Tottenham",
 POSITIONS = ["GK", "Goalkeeper", "GKP", "Defender", "Defenders", "DEF",
              "Midfielder", "Midfielders", "MID", "Forward", "Forwards", "FWD"]
 
-METRICS = ["goals", "assists", "points", "bonus points", "clean sheets", 
+METRICS = ["goals", "goal scorer", "goal scorers", "scorer", "assists", "points", "bonus points", "clean sheets", 
            "ICT index", "minutes played", "fixtures", "form", "value"]
 
 # Budget pattern - captures "under X", "<X", "below X", etc.

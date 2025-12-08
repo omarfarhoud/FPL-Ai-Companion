@@ -94,12 +94,12 @@ team performance, and strategic recommendations. You provide accurate, data-driv
 Question: {user_query}
 
 Requirements:
-1. Answer based solely on the provided data
-2. If information is insufficient, clearly state what's missing
-3. Cite specific statistics when relevant (e.g., "Salah scored 20 goals with 250 total points")
-4. Be concise and actionable
-5. Do not make up or assume information not in the context
-6. Format numbers clearly (e.g., "£8.5m" for value)
+1. CRITICAL: If a player name is mentioned in "Extracted Entities", answer about THAT EXACT PLAYER ONLY
+2. Answer based solely on the provided data - do not confuse similar names
+3. If information is insufficient or player not found, say "I don't have information about [player name]"
+4. Cite specific statistics when relevant (e.g., "Player X scored Y goals with Z total points")
+5. Be concise and factual - maximum 3-4 sentences
+6. Format values clearly (e.g., "£8.5m" for price)
 
 Answer:"""
         
@@ -127,25 +127,28 @@ Answer:"""
         
         # Format structured data (Cypher results)
         if merged_context.get("structured_data"):
-            context_parts.append("=== Structured Query Results (from Knowledge Graph) ===")
-            for i, item in enumerate(merged_context["structured_data"][:15], 1):
+            context_parts.append("=== Database Query Results ===")
+            for i, item in enumerate(merged_context["structured_data"][:10], 1):
                 # Format each item nicely
                 formatted_item = ", ".join([f"{k}: {v}" for k, v in item.items()])
                 context_parts.append(f"{i}. {formatted_item}")
             context_parts.append("")
         
-        # Format semantic matches (embedding results)
+        # Format semantic matches (embedding results) - ONLY IF NO STRUCTURED DATA
         if merged_context.get("semantic_matches"):
-            context_parts.append("=== Semantic Search Results (similar players) ===")
+            context_parts.append("=== Similar Players Found ===")
             for i, item in enumerate(merged_context["semantic_matches"][:8], 1):
-                context_parts.append(
-                    f"{i}. {item['name']} ({item['position']}) - "
-                    f"Total Points: {item['total_points']}, "
-                    f"Goals: {item.get('goals', 0)}, "
-                    f"Assists: {item.get('assists', 0)}, "
-                    f"Value: £{item['avg_value']}m, "
-                    f"Form: {item.get('avg_form', 0)}"
-                )
+                player_info = f"{item['name']} ({item['position']})"
+                stats = f"Points: {item['total_points']}, Goals: {item.get('goals', 0)}, Assists: {item.get('assists', 0)}"
+                value_form = f"Value: £{item['avg_value']}m, Form: {item.get('avg_form', 0)}"
+                context_parts.append(f"{i}. {player_info} - {stats}, {value_form}")
+            context_parts.append("")
+        
+        # Add important note about player names
+        if merged_context.get("entities", {}).get("player"):
+            mentioned_players = merged_context["entities"]["player"]
+            context_parts.append(f"IMPORTANT: User asked about: {', '.join(mentioned_players)}")
+            context_parts.append("Make sure to answer about these specific players only.")
             context_parts.append("")
         
         return "\n".join(context_parts)
@@ -162,11 +165,11 @@ class LLMClient:
         self.merger = ResultMerger()
         self.prompt_builder = PromptBuilder()
         
-        # Define the three models
+        # Define the three models (using smaller, faster versions)
         self.models = {
-            "llama": "llama3.2",     # Llama 3.2
-            "mistral": "mistral",     # Mistral 7B
-            "phi3": "phi3"            # Phi-3
+            "llama": "llama3.2:1b",      # Llama 3.2 1B (fast)
+            "qwen": "qwen2.5:1.5b",      # Qwen 2.5 1.5B (fast)
+            "phi3": "phi3:mini"          # Phi-3 Mini
         }
     
     def generate_response(
@@ -174,7 +177,7 @@ class LLMClient:
         user_query: str, 
         baseline_results: Dict, 
         embedding_results: Dict,
-        model_name: Literal["llama", "mistral", "phi3"] = "llama"
+        model_name: Literal["llama", "qwen", "phi3"] = "llama"
     ) -> Dict:
         """
         Generate LLM response using merged KG results
@@ -183,7 +186,7 @@ class LLMClient:
             user_query: Original user question
             baseline_results: Cypher query results from retriever.py
             embedding_results: Semantic search results from retriever.py
-            model_name: Which model to use ("llama", "mistral", or "phi3")
+            model_name: Which model to use ("llama", "qwen", or "phi3")
             
         Returns:
             Dict with response, metadata, and metrics
@@ -239,13 +242,20 @@ class LLMClient:
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": 0.7,
+                "temperature": 0.3,
                 "top_p": 0.9,
-                "top_k": 40
+                "top_k": 40,
+                "num_predict": 150,        # Limit response length
+                "num_ctx": 1024,           # Smaller context for speed
+                "num_gpu": 1,              # Enable GPU
+                "num_thread": 8,           # CPU threads
+                "repeat_penalty": 1.1
             }
         }
         
-        response = requests.post(url, json=payload, timeout=120)
+        # Increase timeout for slower models
+        timeout = 300 if model_name == "phi3" else 120
+        response = requests.post(url, json=payload, timeout=timeout)
         
         if response.status_code != 200:
             raise Exception(f"Ollama API error: {response.status_code} - {response.text}")
@@ -265,7 +275,7 @@ class LLMClient:
         embedding_results: Dict
     ) -> Dict:
         """
-        Compare all three models (Llama, Mistral, Phi-3) on the same query
+        Compare all three models (Llama, Qwen, Phi-3) on the same query
         
         Returns:
             Dict with results from all models for comparison
@@ -276,7 +286,7 @@ class LLMClient:
         
         results = {}
         
-        for model_name in ["llama", "mistral", "phi3"]:
+        for model_name in ["llama", "qwen", "phi3"]:
             try:
                 results[model_name] = self.generate_response(
                     user_query,
@@ -408,7 +418,7 @@ class ModelEvaluator:
             "="*80
         ]
         
-        for model_name in ["llama", "mistral", "phi3"]:
+        for model_name in ["llama", "qwen", "phi3"]:
             result = comparison_results.get(model_name, {})
             
             report.append(f"\n{'─'*80}")
@@ -455,7 +465,7 @@ class ModelEvaluator:
         output.write(f"{'Model':<15} {'Time (s)':<12} {'Tokens':<12} {'Has Stats':<12} {'Cites Data':<12} {'Complete':<12}\n")
         output.write("-"*100 + "\n")
         
-        for model_name in ["llama", "mistral", "phi3"]:
+        for model_name in ["llama", "qwen", "phi3"]:
             result = comparison_results.get(model_name, {})
             
             if not result.get("success"):
@@ -480,7 +490,7 @@ class ModelEvaluator:
 # Example usage
 # ----------------------------
 if __name__ == "__main__":
-    print("LLM Client initialized with Llama, Mistral, and Phi-3")
+    print("LLM Client initialized with Llama, Qwen, and Phi-3")
     print("Use this module with retriever.py to generate responses")
     print("\nExample:")
     print("  from retriever import FPLHybridRetriever")

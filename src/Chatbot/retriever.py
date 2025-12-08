@@ -50,6 +50,7 @@ class FPLBaselineRetriever:
         """Map each intent to relevant query template indices"""
         return {
             "get_player_stats": [1, 10],          # Player stats, recent form
+            "get_leaderboard": [12, 13, 14, 15],  # Top goal scorers, assists, points, bonus
             "compare_players": [5],                # Compare players
             "get_recommendation": [0, 6, 11, 8],   # Top by position, budget, value picks, captain
             "team_analysis": [2, 7],               # Team analysis, clean sheets
@@ -143,37 +144,60 @@ class FPLBaselineRetriever:
                 """,
                 "required": ["team"]
             },
-            5: {  # Compare players (aggregated stats) - FUZZY MATCH
+            5: {  # Compare multiple players - BEST MATCH FIRST, THEN STATS
                 "cypher": """
-                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p:Player)
                     WHERE ANY(name IN $players WHERE toLower(p.player_name) CONTAINS toLower(name))
-                    WITH p, 
+                    WITH p,
+                         CASE 
+                             WHEN ANY(name IN $players WHERE toLower(p.player_name) = toLower(name)) THEN 0
+                             WHEN ANY(name IN $players WHERE toLower(p.player_name) ENDS WITH ' ' + toLower(name)) THEN 1
+                             ELSE 2
+                         END AS match_score
+                    ORDER BY match_score
+                    WITH collect(p)[0..10] AS matched_players
+                    UNWIND matched_players AS p
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
+                    WITH p, pos.name AS position,
                          sum(r.total_points) AS total_points,
                          sum(r.goals_scored) AS goals_scored,
                          sum(r.assists) AS assists,
-                         avg(r.value) AS avg_value
-                    RETURN p.player_name, 
+                         avg(r.value) AS avg_value,
+                         avg(r.form) AS avg_form
+                    RETURN p.player_name AS name, 
+                           position,
                            total_points, 
                            goals_scored, 
                            assists, 
-                           avg_value
+                           avg_value AS price,
+                           avg_form AS form
                     ORDER BY total_points DESC
                 """,
                 "required": ["players"]
             },
-            6: {  # Players under budget (by average value) - NO REQUIRED PARAMS
+            6: {  # Players under budget with position filter and form
                 "cypher": """
                     MATCH (p:Player)-[:PLAYS_AS]->(pos:Position)
                     MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
                     WITH p, pos, 
                          avg(r.value) AS avg_value,
-                         sum(r.total_points) AS total_points
+                         avg(r.form) AS avg_form,
+                         sum(r.total_points) AS total_points,
+                         sum(r.goals_scored) AS goals_scored,
+                         sum(r.assists) AS assists
                     WHERE avg_value <= $max_value AND total_points > 0
-                    RETURN p.player_name, 
+                    // Optionally filter by position if provided
+                    WITH p, pos, avg_value, avg_form, total_points, goals_scored, assists
+                    WHERE $position = '' OR pos.name = $position
+                    RETURN p.player_name AS name, 
+                           pos.name AS position,
                            total_points, 
-                           avg_value,
-                           pos.name AS position
-                    ORDER BY total_points DESC
+                           goals_scored,
+                           assists,
+                           avg_value AS price,
+                           avg_form AS form
+                    ORDER BY avg_form DESC, total_points DESC
                     LIMIT 10
                 """,
                 "required": []  # Changed from ["max_value"] since we provide it as default
@@ -256,6 +280,84 @@ class FPLBaselineRetriever:
                     LIMIT 10
                 """,
                 "required": ["position"]
+            },
+            12: {  # Top goal scorers (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WITH p, pos,
+                         sum(r.goals_scored) AS total_goals,
+                         sum(r.total_points) AS total_points,
+                         avg(r.value) AS avg_value
+                    WHERE total_goals > 0
+                    RETURN p.player_name, 
+                           pos.name AS position,
+                           total_goals,
+                           total_points,
+                           avg_value
+                    ORDER BY total_goals DESC
+                    LIMIT $limit
+                """,
+                "required": []
+            },
+            13: {  # Top assist providers (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WITH p, pos,
+                         sum(r.assists) AS total_assists,
+                         sum(r.total_points) AS total_points,
+                         avg(r.value) AS avg_value
+                    WHERE total_assists > 0
+                    RETURN p.player_name, 
+                           pos.name AS position,
+                           total_assists,
+                           total_points,
+                           avg_value
+                    ORDER BY total_assists DESC
+                    LIMIT $limit
+                """,
+                "required": []
+            },
+            14: {  # Top point scorers (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WITH p, pos,
+                         sum(r.total_points) AS total_points,
+                         sum(r.goals_scored) AS total_goals,
+                         sum(r.assists) AS total_assists,
+                         avg(r.value) AS avg_value
+                    WHERE total_points > 0
+                    RETURN p.player_name, 
+                           pos.name AS position,
+                           total_points,
+                           total_goals,
+                           total_assists,
+                           avg_value
+                    ORDER BY total_points DESC
+                    LIMIT $limit
+                """,
+                "required": []
+            },
+            15: {  # Top bonus point scorers (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WITH p, pos,
+                         sum(r.bonus) AS total_bonus,
+                         sum(r.total_points) AS total_points,
+                         avg(r.value) AS avg_value
+                    WHERE total_bonus > 0
+                    RETURN p.player_name AS name, 
+                           pos.name AS position,
+                           total_bonus AS bonus_points,
+                           total_points,
+                           avg_value AS price
+                    ORDER BY total_bonus DESC
+                    LIMIT $limit
+                """,
+                "required": []
             }
         }
 
@@ -313,7 +415,38 @@ class FPLBaselineRetriever:
                     params["max_value"] = 100
             else:
                 params["max_value"] = 100  # Value is in 10ths (e.g., 100 = £10.0m)
-            
+        if "position" not in params:
+            # Check for position in entities
+            if "position" in entities and entities["position"]:
+                position_str = entities["position"][0] if isinstance(entities["position"], list) else entities["position"]
+                # Normalize position names
+                position_map = {
+                    "forward": "Forward",
+                    "forwards": "Forward", 
+                    "striker": "Forward",
+                    "strikers": "Forward",
+                    "midfielder": "Midfielder",
+                    "midfielders": "Midfielder",
+                    "mid": "Midfielder",
+                    "defender": "Defender",
+                    "defenders": "Defender",
+                    "defence": "Defender",
+                    "goalkeeper": "Goalkeeper",
+                    "goalkeepers": "Goalkeeper",
+                    "keeper": "Goalkeeper",
+                    "gk": "Goalkeeper"
+                }
+                params["position"] = position_map.get(position_str.lower(), position_str)
+            else:
+                params["position"] = ""  # Empty string means no filter
+        if "limit" not in params:
+            # Check if limit was extracted from query and stored in entities
+            if "limit" in entities and entities["limit"]:
+                params["limit"] = int(entities["limit"])
+            else:
+                # Default to 10 if not already extracted from query
+                params["limit"] = 10
+        
         return params
 
     def retrieve(self, user_query):
@@ -328,12 +461,41 @@ class FPLBaselineRetriever:
         
         # Step 2: Extract entities
         entities = self.entity_extractor.extract(user_query)
+        
+        # Step 2.5: Extract number from query for "top N" patterns
+        import re
+        numbers = re.findall(r'(?:top|best|first)\s+(\d+)', user_query.lower())
+        if numbers:
+            entities["limit"] = int(numbers[0])
+        
         print(f"Extracted Entities: {entities}")
         
         # Step 3: Get relevant query indices for this intent
         query_indices = self.intent_to_queries.get(intent, [])
         if not query_indices:
             return {"intent": intent, "message": "No relevant queries for this intent", "results": []}
+        
+        # Step 3.5: Smart query filtering for leaderboard queries
+        if intent == "get_leaderboard":
+            metrics = entities.get("metric", [])
+            query_lower = user_query.lower()
+            
+            # Build metric string from entities OR raw query
+            if metrics:
+                metric_str = " ".join(metrics).lower()
+            else:
+                metric_str = query_lower
+            
+            # Map metrics to specific queries
+            if "bonus" in metric_str:
+                query_indices = [15]  # Only bonus points query
+            elif "goal" in metric_str or "scorer" in metric_str:
+                query_indices = [12]  # Only goals query
+            elif "assist" in metric_str:
+                query_indices = [13]  # Only assists query
+            elif "point" in metric_str and "bonus" not in metric_str:
+                query_indices = [14]  # Only total points query
+            # Otherwise keep all leaderboard queries
         
         # Step 4: Execute relevant queries
         all_results = []
@@ -650,8 +812,18 @@ class FPLHybridRetriever:
     
     def retrieve(self, user_query, use_embeddings=True):
         baseline_results = self.baseline.retrieve(user_query)
-        if not use_embeddings:
-            return baseline_results
+        
+        # Smart embedding decision: skip embeddings for queries with perfect structured answers
+        intent = baseline_results.get("intent", "unknown")
+        skip_embeddings_for = ["get_leaderboard", "team_analysis", "fixture_query"]
+        
+        if not use_embeddings or intent in skip_embeddings_for:
+            # Return empty semantic search results
+            return {
+                "baseline": baseline_results, 
+                "semantic_search": {"model1": [], "model2": []}
+            }
+        
         embedding_results = self.embedding.embedding_search(user_query, top_k=5, model="both")
         return {"baseline": baseline_results, "semantic_search": embedding_results}
     
