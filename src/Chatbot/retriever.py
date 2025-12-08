@@ -377,76 +377,121 @@ class FPLBaselineRetriever:
 
 
 # ----------------------------
-# 2. Enhanced Embedding Retriever (TWO models)
+# 2. Enhanced Embedding Retriever (Neo4j vector index)
 # ----------------------------
 class FPLEmbeddingRetriever:
     def __init__(self, 
                  model1="sentence-transformers/all-MiniLM-L6-v2",
-                 model2="sentence-transformers/all-mpnet-base-v2",
-                 cache_dir="embeddings_cache"):
+                 model2="sentence-transformers/all-mpnet-base-v2"):
         config = load_config()
         self.driver = GraphDatabase.driver(config['URI'], auth=(config['USERNAME'], config['PASSWORD']))
         
-        # Cache directory
-        self.cache_dir = cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-        
-        # Cache file paths
-        self.cache_file_m1 = os.path.join(cache_dir, f"embeddings_model1.pkl")
-        self.cache_file_m2 = os.path.join(cache_dir, f"embeddings_model2.pkl")
-        self.cache_file_metadata = os.path.join(cache_dir, f"embeddings_metadata.pkl")
-        
-        # Load TWO embedding models for comparison
         print(f"Loading Model 1: {model1}")
         self.model1 = SentenceTransformer(model1)
         print(f"Loading Model 2: {model2}")
         self.model2 = SentenceTransformer(model2)
         
-        self.node_embeddings_m1 = {}  # node_id -> embedding (model 1)
-        self.node_embeddings_m2 = {}  # node_id -> embedding (model 2)
-        self.node_metadata = {}       # node_id -> metadata
+        self.node_metadata = {}
+        self.node_embeddings_m1 = {}
+        self.node_embeddings_m2 = {}
+        self.cache_loaded = self._load_from_neo4j()
 
     def close(self):
         self.driver.close()
-    
-    def _load_from_cache(self):
-        """Load embeddings from cache if available"""
-        if (os.path.exists(self.cache_file_m1) and 
-            os.path.exists(self.cache_file_m2) and 
-            os.path.exists(self.cache_file_metadata)):
+
+    def _load_from_neo4j(self):
+        """Load embeddings from Neo4j without limits"""
+        with self.driver.session() as session:
+            try:
+                # REMOVED LIMIT 1000 to ensure full DB load
+                result = session.run("""
+                    MATCH (p:Player)
+                    WHERE p.embedding_m1 IS NOT NULL AND p.embedding_m2 IS NOT NULL
+                    RETURN p.player_name AS name,
+                           p.embedding_m1 AS emb1,
+                           p.embedding_m2 AS emb2
+                """)
+                
+                loaded = 0
+                for r in result:
+                    if r["emb1"] and r["emb2"]:
+                        self.node_embeddings_m1[r["name"]] = np.array(r["emb1"])
+                        self.node_embeddings_m2[r["name"]] = np.array(r["emb2"])
+                        loaded += 1
+                
+                # Load metadata separately (efficient batch fetch)
+                if loaded > 0:
+                    self._load_metadata_from_graph()
+                
+                print(f"✓ Loaded {loaded} embeddings from Neo4j")
+                return loaded > 0
             
-            print("Loading embeddings from cache...")
-            with open(self.cache_file_m1, 'rb') as f:
-                self.node_embeddings_m1 = pickle.load(f)
-            with open(self.cache_file_m2, 'rb') as f:
-                self.node_embeddings_m2 = pickle.load(f)
-            with open(self.cache_file_metadata, 'rb') as f:
-                self.node_metadata = pickle.load(f)
-            print(f"✓ Loaded {len(self.node_embeddings_m1)} embeddings from cache")
-            return True
-        return False
-    
-    def _save_to_cache(self):
-        """Save embeddings to cache"""
-        print("Saving embeddings to cache...")
-        with open(self.cache_file_m1, 'wb') as f:
-            pickle.dump(self.node_embeddings_m1, f)
-        with open(self.cache_file_m2, 'wb') as f:
-            pickle.dump(self.node_embeddings_m2, f)
-        with open(self.cache_file_metadata, 'wb') as f:
-            pickle.dump(self.node_metadata, f)
-        print(f"✓ Saved embeddings to {self.cache_dir}/")
+            except Exception as e:
+                print(f"⚠ Could not load embeddings from Neo4j: {e}")
+                return False
+
+    def _load_metadata_from_graph(self):
+        """Load player metadata from graph structure"""
+        if not self.node_embeddings_m1:
+            return
+
+        with self.driver.session() as session:
+            # We fetch metadata only for loaded players
+            result = session.run("""
+                MATCH (p:Player)-[:PLAYS_AS]->(pos:Position)
+                MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
+                WHERE p.player_name IN $names
+                WITH p, pos,
+                     sum(r.total_points) AS total_points,
+                     sum(r.goals_scored) AS goals,
+                     sum(r.assists) AS assists,
+                     avg(r.value) AS avg_value,
+                     avg(r.form) AS avg_form,
+                     sum(r.minutes) AS total_minutes
+                RETURN p.player_name AS name,
+                       pos.name AS position,
+                       total_points,
+                       goals,
+                       assists,
+                       avg_value,
+                       avg_form,
+                       total_minutes
+            """, names=list(self.node_embeddings_m1.keys()))
+            
+            for r in result:
+                self.node_metadata[r['name']] = {
+                    "name": r['name'],
+                    "position": r['position'],
+                    "total_points": r['total_points'],
+                    "goals": r['goals'],
+                    "assists": r['assists'],
+                    "avg_value": round(r['avg_value']/10.0, 1) if r['avg_value'] else 0,
+                    "avg_form": round(r['avg_form'], 2) if r['avg_form'] else 0,
+                    "total_minutes": r['total_minutes']
+                }
+
+    def _save_to_neo4j(self):
+        """Persist generated embeddings to the database"""
+        print("Saving embeddings to Neo4j (this may take a moment)...")
+        with self.driver.session() as session:
+            for node_id in self.node_embeddings_m1:
+                session.run("""
+                    MATCH (p:Player {player_name: $name})
+                    SET p.embedding_m1 = $emb1,
+                        p.embedding_m2 = $emb2
+                """, name=node_id,
+                     emb1=self.node_embeddings_m1[node_id].tolist(),
+                     emb2=self.node_embeddings_m2[node_id].tolist())
+        print("✓ Saved embeddings to Neo4j")
 
     def embed_nodes(self, force_regenerate=False):
-        """Create embeddings for all player nodes (aggregated stats)"""
-        # Try to load from cache first
-        if not force_regenerate and self._load_from_cache():
+        """Generate embeddings for all players in the DB"""
+        if not force_regenerate and self.cache_loaded:
             return
         
-        print("\nGenerating embeddings for all players...")
-        
+        print("Generating new embeddings...")
         with self.driver.session() as session:
-            # Fetch aggregated player data
+            # REMOVED LIMIT 1000
             result = session.run("""
                 MATCH (p:Player)-[:PLAYS_AS]->(pos:Position)
                 MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
@@ -465,95 +510,137 @@ class FPLEmbeddingRetriever:
                        avg_value,
                        avg_form,
                        total_minutes
-                LIMIT 1000
             """)
+            self.node_embeddings_m1 = {}
+            self.node_embeddings_m2 = {}
             
+            count = 0
             for record in result:
-                # Create rich text representation
-                text_repr = self._create_text_representation(record)
                 node_id = record['name']
+                text_repr = self._create_text_representation(record)
                 
-                # Generate embeddings with both models
                 self.node_embeddings_m1[node_id] = self.model1.encode(text_repr)
                 self.node_embeddings_m2[node_id] = self.model2.encode(text_repr)
                 
-                # Store metadata
                 self.node_metadata[node_id] = {
                     "name": record['name'],
                     "position": record['position'],
                     "total_points": record['total_points'],
                     "goals": record['goals'],
                     "assists": record['assists'],
-                    "avg_value": round(record['avg_value'] / 10.0, 1) if record['avg_value'] else 0,  # Convert to millions
-                    "avg_form": round(record['avg_form'], 2) if record['avg_form'] else 0
+                    "avg_value": round(record['avg_value']/10.0,1) if record['avg_value'] else 0,
+                    "avg_form": round(record['avg_form'],2) if record['avg_form'] else 0,
+                    "total_minutes": record['total_minutes']
                 }
-        
+                count += 1
+                
         print(f"✓ Generated embeddings for {len(self.node_embeddings_m1)} players")
-        
-        # Save to cache
-        self._save_to_cache()
+        self._save_to_neo4j()
 
     def _create_text_representation(self, record):
-        """Create rich text representation for embedding"""
-        avg_value_m = record['avg_value'] / 10.0 if record['avg_value'] else 0
-        
-        return (f"Player: {record['name']}, "
-                f"Position: {record['position']}, "
-                f"Total Points: {record['total_points']}, "
-                f"Goals: {record['goals']}, "
-                f"Assists: {record['assists']}, "
-                f"Average Value: £{avg_value_m:.1f}m, "
-                f"Average Form: {record['avg_form']:.2f}, "
-                f"Total Minutes: {record['total_minutes']}")
-
-    def embedding_search(self, query_text, top_k=5, model="both"):
         """
-        Semantic search using embeddings
+        Creates a 'stuffed' text representation to improve vector specificity.
+        Repeats key identifiers (Name, Position) to increase attention weight.
+        """
+        avg_value_m = record['avg_value']/10.0 if record['avg_value'] else 0
         
-        Args:
-            query_text: User query
-            top_k: Number of results to return
-            model: "model1", "model2", or "both" (for comparison)
+        text = (
+            f"Name: {record['name']}. "
+            f"Player: {record['name']}. "  # Repetition helps the vector focus on the name
+            f"Position: {record['position']}. "
+            f"Premier League Footballer playing as {record['position']}. "
+            f"FPL Stats: {record['total_points']} total points, "
+            f"{record['goals']} goals, {record['assists']} assists. "
+            f"Current Price: £{avg_value_m:.1f} million. "
+            f"Current Form: {record['avg_form']:.2f}. "
+            f"Minutes played: {record['total_minutes']}."
+        )
+        return text
+
+    def embedding_search(self, query_text, top_k=5, model="both", use_neo4j_index=False):
+        """
+        Search with option to use Neo4j vector index or manual similarity.
+        Set use_neo4j_index=False to use Python-based cosine similarity (often faster for small datasets).
         """
         results = {}
         
-        if model in ["model1", "both"]:
-            results["model1"] = self._search_with_model(
-                query_text, self.model1, self.node_embeddings_m1, top_k
-            )
+        if use_neo4j_index:
+            try:
+                if model in ["model1", "both"]:
+                    results["model1"] = self._search_with_neo4j(
+                        query_text, top_k, index="playerEmbeddingIndex_m1"
+                    )
+                if model in ["model2", "both"]:
+                    results["model2"] = self._search_with_neo4j(
+                        query_text, top_k, index="playerEmbeddingIndex_m2"
+                    )
+            except Exception as e:
+                print(f"⚠ Neo4j vector search failed: {e}")
+                print("Falling back to manual similarity computation...")
+                use_neo4j_index = False
         
-        if model in ["model2", "both"]:
-            results["model2"] = self._search_with_model(
-                query_text, self.model2, self.node_embeddings_m2, top_k
-            )
+        if not use_neo4j_index:
+            # Use manual cosine similarity
+            if model in ["model1", "both"]:
+                results["model1"] = self._search_with_manual_similarity(
+                    query_text, top_k, model_key="m1"
+                )
+            if model in ["model2", "both"]:
+                results["model2"] = self._search_with_manual_similarity(
+                    query_text, top_k, model_key="m2"
+                )
         
         return results
 
-    def _search_with_model(self, query_text, model, embeddings_dict, top_k):
-        """Perform search with a specific model"""
-        query_vec = model.encode(query_text)
-        similarities = []
-        
-        for node_id, node_vec in embeddings_dict.items():
-            sim = cosine_similarity([query_vec], [node_vec])[0][0]
-            similarities.append((node_id, sim))
-        
-        # Sort by similarity
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        top_results = similarities[:top_k]
-        
-        # Add metadata
+    def _search_with_neo4j(self, query_text, top_k, index):
+        """Execute vector search using Neo4j's native index"""
+        model = self.model1 if "m1" in index else self.model2
+        query_vec = model.encode(query_text).tolist()
         enriched_results = []
-        for node_id, score in top_results:
-            result = self.node_metadata[node_id].copy()
-            result['similarity_score'] = float(score)
-            enriched_results.append(result)
+        
+        with self.driver.session() as session:
+            result = session.run("""
+                CALL db.index.vector.queryNodes($index, $k, $vec)
+                YIELD node, score
+                RETURN node.player_name AS name, score
+            """, index=index, vec=query_vec, k=top_k)
+            
+            for r in result:
+                node_id = r["name"]
+                score = r["score"]
+                if node_id in self.node_metadata:
+                    meta = self.node_metadata[node_id].copy()
+                    meta["similarity_score"] = float(score)
+                    enriched_results.append(meta)
         
         return enriched_results
 
+    def _search_with_manual_similarity(self, query_text, top_k, model_key="m1"):
+        """Fallback: compute similarities in Python"""
+        model = self.model1 if model_key == "m1" else self.model2
+        embeddings_dict = self.node_embeddings_m1 if model_key == "m1" else self.node_embeddings_m2
+        
+        if not embeddings_dict:
+            return []
+
+        # Encode query
+        query_vec = model.encode(query_text).reshape(1, -1)
+        
+        # Compute similarities
+        results = []
+        for node_id, node_embedding in embeddings_dict.items():
+            similarity = cosine_similarity(query_vec, node_embedding.reshape(1, -1))[0][0]
+            if node_id in self.node_metadata:
+                meta = self.node_metadata[node_id].copy()
+                meta["similarity_score"] = float(similarity)
+                results.append(meta)
+        
+        # Sort and return top_k
+        results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return results[:top_k]
 
 # ----------------------------
-# 3. Hybrid Retriever (Combines both approaches)
+# 3. Hybrid Retriever
 # ----------------------------
 class FPLHybridRetriever:
     def __init__(self):
@@ -562,90 +649,66 @@ class FPLHybridRetriever:
         self.embedding.embed_nodes()
     
     def retrieve(self, user_query, use_embeddings=True):
-        """
-        Hybrid retrieval combining structured queries and semantic search
-        """
-        # Get baseline results
         baseline_results = self.baseline.retrieve(user_query)
-        
         if not use_embeddings:
             return baseline_results
-        
-        # Enhance with embedding search
         embedding_results = self.embedding.embedding_search(user_query, top_k=5, model="both")
-        
-        return {
-            "baseline": baseline_results,
-            "semantic_search": embedding_results
-        }
+        return {"baseline": baseline_results, "semantic_search": embedding_results}
     
     def close(self):
         self.baseline.close()
         self.embedding.close()
 
 
-# ----------------------------
-# Example Usage & Testing
-# ----------------------------
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("TESTING FPL RETRIEVAL SYSTEM")
-    print("="*60)
+    print("=" * 60)
+    print("DEBUGGING EMBEDDINGS (BOTH MODELS)")
+    print("=" * 60)
     
-    # Test queries
+    # 1. Initialize
+    embedding = FPLEmbeddingRetriever()
+    
+    # 2. Check/Generate Embeddings
+    # Keep this False since you successfully generated them in the last run
+    print("Checking for existing embeddings...")
+    embedding.embed_nodes(force_regenerate=False)
+    
+    # 3. Test Queries
     test_queries = [
-        "How many goals did Salah score this season?",
-        "Compare Haaland and Kane",
-        "Best defenders under 5 million",
-        "Who should I captain this week?",
-        "How is Liverpool performing?",
-        "Who does Chelsea play next?"
+        "Mohamed Salah",
+        "Haaland",
+        "High scoring defenders under 5 million",
+        "Premium Midfielders" 
     ]
     
-    # Test Baseline
-    print("\n" + "="*60)
-    print("EXPERIMENT 1: BASELINE RETRIEVER")
-    print("="*60)
-    baseline = FPLBaselineRetriever()
-    
-    for query in test_queries[:3]:  # Test first 3
-        result = baseline.retrieve(query)
+    for query in test_queries:
         print(f"\n{'='*60}")
-        print(f"RESULTS FOR: {query}")
+        print(f"QUERY: {query}")
         print(f"{'='*60}")
-        if result['results']:
-            for res in result['results']:
-                print(f"\nQuery {res['query_id']} Results:")
-                for row in res['data'][:3]:  # Show top 3
-                    print(f"  {row}")
+        
+        # Request BOTH models
+        # Note: If you haven't run the CREATE INDEX Cypher commands yet, 
+        # this will print a warning and automatically fall back to manual calculation for both.
+        results = embedding.embedding_search(query, top_k=3, model="both", use_neo4j_index=True)
+        
+        # --- Print Model 1 Results ---
+        print(f"\n--- Model 1 (MiniLM - Faster) ---")
+        m1_results = results.get('model1', [])
+        if not m1_results:
+            print("No results.")
         else:
-            print("No results found")
-        print("-"*60)
-    
-    baseline.close()
-    
-    # Test Embedding
-    print("\n" + "="*60)
-    print("EXPERIMENT 2: EMBEDDING RETRIEVER (2 Models)")
-    print("="*60)
-    embedding = FPLEmbeddingRetriever()
-    embedding.embed_nodes()  # Will load from cache on subsequent runs
-    
-    for query in test_queries[:3]:
-        result = embedding.embedding_search(query, top_k=3, model="both")
-        print(f"\n{'='*60}")
-        print(f"RESULTS FOR: {query}")
-        print(f"{'='*60}")
-        print(f"\nModel 1 (all-MiniLM-L6-v2):")
-        for row in result.get('model1', []):
-            print(f"  {row}")
-        print(f"\nModel 2 (all-mpnet-base-v2):")
-        for row in result.get('model2', []):
-            print(f"  {row}")
-        print("-"*60)
-    
+            for i, p in enumerate(m1_results, 1):
+                print(f" {i}. {p['name']} ({p['position']}) | Score: {p['similarity_score']:.4f}")
+                print(f"    Stats: {p['total_points']} pts | £{p['avg_value']}m")
+
+        # --- Print Model 2 Results ---
+        print(f"\n--- Model 2 (MPNet - More Accurate) ---")
+        m2_results = results.get('model2', [])
+        if not m2_results:
+            print("No results.")
+        else:
+            for i, p in enumerate(m2_results, 1):
+                print(f" {i}. {p['name']} ({p['position']}) | Score: {p['similarity_score']:.4f}")
+                print(f"    Stats: {p['total_points']} pts | £{p['avg_value']}m")
+
     embedding.close()
-    
-    print("\n✓ Testing complete!")
-    print("\nNote: Embeddings are cached in 'embeddings_cache/' directory.")
-    print("To regenerate embeddings, delete this directory or use force_regenerate=True")
