@@ -24,7 +24,7 @@ class IntentClassifier:
         )
 
         # Move to device
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
         self.model.to(self.device)
         print(f"✔ {model_id} loaded on {self.device}.")
 

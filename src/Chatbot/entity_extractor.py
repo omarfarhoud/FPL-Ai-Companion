@@ -80,7 +80,7 @@ class HybridEntityExtractor:
             local_files_only=False
         )
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
         self.model.to(self.device)
         print(f"✔ LLM loaded on {self.device}.")
 

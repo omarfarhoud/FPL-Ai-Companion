@@ -26,6 +26,8 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "sentence-transformers>=5.1.2",
     "transformers>=4.57.3",
+    "streamlit>=1.52.1",
+    "faiss-cpu>=1.13.1",
 ]
 [[tool.uv.index]]
 name = "pytorch"
