@@ -20,7 +20,7 @@ TEAMS = ["Liverpool", "Arsenal", "Man City", "Manchester City", "Tottenham",
          "Chelsea", "Newcastle", "Brighton", "Man United", "Manchester United",
          "Aston Villa", "West Ham", "Fulham", "Wolves", "Everton", "Brentford"]
 
-POSITIONS = ["GK", "Goalkeeper", "GKP", "Defender", "Defenders", "DEF",
+POSITIONS = ["GK", "Goalkeeper", "Goalkeepers", "GKP", "Defender", "Defenders", "DEF",
              "Midfielder", "Midfielders", "MID", "Forward", "Forwards", "FWD"]
 
 METRICS = ["goals", "goal scorer", "goal scorers", "scorer", "assists", "points", "bonus points", "clean sheets", 
@@ -29,23 +29,27 @@ METRICS = ["goals", "goal scorer", "goal scorers", "scorer", "assists", "points"
 # Budget pattern - captures "under X", "<X", "below X", etc.
 BUDGET_PATTERN = r'(?:under|below|less than|<|maximum|max)\s*[£$]?\s*(\d+\.?\d*)\s*(?:m|million)?'
 
+# Cleansheet pattern - captures "at least X", ">X", "more than X" cleansheets
+CLEANSHEET_PATTERN = r'(?:at least|minimum|min|>=?|more than)\s*(\d+)\s*(?:clean\s*sheets?|cleansheets?)'
+
 GAMEWEEKS = [f"GW{i}" for i in range(1, 39)]
 SEASON_PATTERN = r"\b(20\d{2})[-/](\d{2})\b"
 
 # --- Normalization maps ---
 POSITION_MAP = {
-    "defender": "Defender",
-    "defenders": "Defender",
-    "midfielder": "Midfielder",
-    "midfielders": "Midfielder",
-    "forward": "Forward",
-    "forwards": "Forward",
-    "goalkeeper": "Goalkeeper",
-    "gkp": "Goalkeeper",
-    "gk": "Goalkeeper",
-    "def": "Defender",
-    "mid": "Midfielder",
-    "fwd": "Forward"
+    "defender": "DEF",
+    "defenders": "DEF",
+    "midfielder": "MID",
+    "midfielders": "MID",
+    "forward": "FWD",
+    "forwards": "FWD",
+    "goalkeeper": "GK",
+    "goalkeepers": "GK",
+    "gkp": "GK",
+    "gk": "GK",
+    "def": "DEF",
+    "mid": "MID",
+    "fwd": "FWD"
 }
 
 METRIC_MAP = {
@@ -102,7 +106,17 @@ class HybridEntityExtractor:
 
         found_positions = [pos for pos in POSITIONS if re.search(rf"\b{pos}\b", query, re.I)]
         if found_positions:
-            entities["position"] = [POSITION_MAP.get(pos.lower(), pos) for pos in found_positions]
+            # Normalize all positions to base case format (GK, DEF, MID, FWD)
+            normalized_positions = []
+            for pos in found_positions:
+                normalized = POSITION_MAP.get(pos.lower(), pos.upper())
+                # If it's already in base case format, keep it
+                if normalized.upper() in ["GK", "DEF", "MID", "FWD"]:
+                    normalized_positions.append(normalized.upper())
+                else:
+                    # If not mapped, try to match it directly if it's a base case
+                    normalized_positions.append(normalized)
+            entities["position"] = list(set(normalized_positions))  # Remove duplicates
 
         found_metrics = [m for m in METRICS if re.search(rf"\b{m}\b", query, re.I)]
         if found_metrics:
@@ -120,6 +134,11 @@ class HybridEntityExtractor:
         budget_match = re.search(BUDGET_PATTERN, query, re.I)
         if budget_match:
             entities["budget"] = [budget_match.group(1)]
+        
+        # Extract cleansheet constraints
+        cleansheet_match = re.search(CLEANSHEET_PATTERN, query, re.I)
+        if cleansheet_match:
+            entities["min_cleansheets"] = [int(cleansheet_match.group(1))]
 
         # --- LLM fallback for missing entities ---
         required_keys = ["player", "team", "position", "metric", "season", "gameweek"]

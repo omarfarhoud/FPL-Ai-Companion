@@ -2,8 +2,115 @@ import time
 import torch
 import json
 import gc
+import re
 from typing import Dict, List, Any, Literal
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# ----------------------------
+# 0. Comparison Post-Processor
+# ----------------------------
+class ComparisonPostProcessor:
+    """Post-process LLM responses to fix numerical comparison errors"""
+    
+    def process_response(self, response_text: str, intent: str, merged_context: Dict) -> str:
+        """Main post-processing to fix comparison hallucinations"""
+        try:
+            if intent != "compare_players":
+                return response_text
+            
+            # Extract ground truth from structured data
+            if not merged_context.get("structured_data"):
+                return response_text
+            
+            player_stats = {}
+            for item in merged_context["structured_data"]:
+                name_full = item.get('name', '')
+                if not name_full:
+                    continue
+                    
+                # Get last name for matching
+                name = name_full.lower().split()[-1] if ' ' in name_full else name_full.lower()
+                if name and name not in player_stats:  # Avoid duplicates
+                    player_stats[name] = {
+                        'goals': item.get('goals_scored', 0),
+                        'assists': item.get('assists', 0),
+                        'points': item.get('total_points', 0)
+                    }
+            
+            # Need exactly 2 players for comparison
+            if len(player_stats) != 2:
+                return response_text
+            
+            # Get the two players
+            players = list(player_stats.keys())
+            p1, p2 = players[0], players[1]
+            
+            # Determine correct winners for each metric
+            if player_stats[p1]['goals'] > player_stats[p2]['goals']:
+                goals_winner = p1
+            else:
+                goals_winner = p2
+            
+            if player_stats[p1]['assists'] > player_stats[p2]['assists']:
+                assists_winner = p1
+            else:
+                assists_winner = p2
+            
+            if player_stats[p1]['points'] > player_stats[p2]['points']:
+                points_winner = p1
+            else:
+                points_winner = p2
+            
+            # Fix each line
+            fixed_lines = []
+            for line in response_text.split('\n'):
+                line_lower = line.lower()
+                
+                # Fix goals statements
+                if 'goal' in line_lower and ('more' in line_lower or 'fewer' in line_lower):
+                    # Check if line incorrectly says p1 has more when p2 actually does
+                    if p1 in line_lower and 'more' in line_lower and goals_winner == p2:
+                        line = line.replace(p1.title(), p2.title())
+                        line = line.replace(p1, p2)
+                    elif p2 in line_lower and 'more' in line_lower and goals_winner == p1:
+                        line = line.replace(p2.title(), p1.title())
+                        line = line.replace(p2, p1)
+                    # Fix "fewer" statements
+                    elif p1 in line_lower and 'fewer' in line_lower and goals_winner == p1:
+                        line = line.replace('fewer', 'more')
+                    elif p2 in line_lower and 'fewer' in line_lower and goals_winner == p2:
+                        line = line.replace('fewer', 'more')
+                
+                # Fix assists statements
+                if 'assist' in line_lower and ('more' in line_lower or 'fewer' in line_lower):
+                    if p1 in line_lower and 'more' in line_lower and assists_winner == p2:
+                        line = line.replace(p1.title(), p2.title())
+                        line = line.replace(p1, p2)
+                    elif p2 in line_lower and 'more' in line_lower and assists_winner == p1:
+                        line = line.replace(p2.title(), p1.title())
+                        line = line.replace(p2, p1)
+                    elif p1 in line_lower and 'fewer' in line_lower and assists_winner == p1:
+                        line = line.replace('fewer', 'more')
+                    elif p2 in line_lower and 'fewer' in line_lower and assists_winner == p2:
+                        line = line.replace('fewer', 'more')
+                
+                # Fix points statements
+                if 'point' in line_lower and ('more' in line_lower or 'higher' in line_lower or 'fewer' in line_lower):
+                    if p1 in line_lower and ('more' in line_lower or 'higher' in line_lower) and points_winner == p2:
+                        line = line.replace(p1.title(), p2.title())
+                        line = line.replace(p1, p2)
+                    elif p2 in line_lower and ('more' in line_lower or 'higher' in line_lower) and points_winner == p1:
+                        line = line.replace(p2.title(), p1.title())
+                        line = line.replace(p2, p1)
+                
+                fixed_lines.append(line)
+            
+            return '\n'.join(fixed_lines)
+        
+        except Exception as e:
+            # If post-processing fails, return original response
+            print(f"⚠️  Post-processing error: {e}")
+            return response_text
 
 # ----------------------------
 # 1. Result Merger (Unchanged)
@@ -40,31 +147,117 @@ class ResultMerger:
         return unique
 
 # ----------------------------
-# 2. Prompt Builder (Unchanged)
+# 2. Prompt Builder (3-Part Structure: PERSONA + CONTEXT + TASK)
 # ----------------------------
 class PromptBuilder:
-    def build_context_string(self, merged_context: Dict) -> str:
-        context_parts = []
-        context_parts.append(f"User Intent: {merged_context.get('intent', 'unknown')}")
+    """Build structured prompts that work universally for any FPL query"""
+    
+    @staticmethod
+    def build_persona() -> str:
+        """
+        PART 1: PERSONA - Define the assistant's role and expertise
+        This stays the same for ALL queries
+        """
+        return """You are an FPL (Fantasy Premier League) expert assistant with comprehensive knowledge of:
+
+• Player Performance Analysis: Goals, assists, points, form, value
+• Team Dynamics: Clean sheets, fixtures, team statistics
+• Strategic Recommendations: Budget optimization, captain picks, differential players
+• Historical Data: Season trends, player comparisons, statistical patterns
+
+Your approach:
+- Provide accurate, data-driven insights
+- Base ALL answers strictly on the provided knowledge base data
+- Include relevant statistics to support your responses
+- Acknowledge when information is insufficient"""
+
+    @staticmethod
+    def build_context(merged_context: Dict) -> str:
+        """
+        PART 2: CONTEXT - Format the retrieved KG data
+        This changes based on what was retrieved from Neo4j
+        """
+        context_parts = ["\n\n### KNOWLEDGE BASE DATA ###\n"]
+        
+        # Add intent and entities for context
+        intent = merged_context.get('intent', 'unknown')
+        context_parts.append(f"Query Type: {intent.replace('_', ' ').title()}")
+        
         if merged_context.get("entities"):
-            context_parts.append(f"Extracted Entities: {json.dumps(merged_context['entities'])}")
+            entities_str = ", ".join([f"{k}: {v}" for k, v in merged_context['entities'].items() if v])
+            context_parts.append(f"Detected Parameters: {entities_str}")
+        
         context_parts.append("")
         
+        # Format structured database results
         if merged_context.get("structured_data"):
-            context_parts.append("=== Database Query Results ===")
-            for i, item in enumerate(merged_context["structured_data"][:10], 1):
-                formatted_item = ", ".join([f"{k}: {v}" for k, v in item.items()])
-                context_parts.append(f"{i}. {formatted_item}")
+            context_parts.append("**Database Query Results:**")
+            for i, item in enumerate(merged_context["structured_data"][:15], 1):
+                # Clean up field names (remove prefixes, format nicely)
+                formatted_fields = []
+                for key, value in item.items():
+                    clean_key = key.replace("p.", "").replace("r.", "").replace("_", " ").title()
+                    # Format numbers nicely
+                    if isinstance(value, float):
+                        value = round(value, 2)
+                    formatted_fields.append(f"{clean_key}: {value}")
+                
+                context_parts.append(f"  {i}. {', '.join(formatted_fields)}")
             context_parts.append("")
         
+        # Format semantic search matches (if any)
         if merged_context.get("semantic_matches"):
-            context_parts.append("=== Similar Players Found ===")
-            for i, item in enumerate(merged_context["semantic_matches"][:8], 1):
+            context_parts.append("**Additional Relevant Players:**")
+            for i, item in enumerate(merged_context["semantic_matches"][:5], 1):
                 player_info = f"{item['name']} ({item['position']})"
-                stats = f"Points: {item['total_points']}, Goals: {item.get('goals', 0)}"
-                context_parts.append(f"{i}. {player_info} - {stats}")
+                stats = f"Points: {item['total_points']}, Price: £{item.get('price', 'N/A')}m"
+                context_parts.append(f"  {i}. {player_info} - {stats}")
             context_parts.append("")
+        
+        # If no data at all
+        if not merged_context.get("structured_data") and not merged_context.get("semantic_matches"):
+            context_parts.append("**No specific data available for this query.**")
+            context_parts.append("")
+        
         return "\n".join(context_parts)
+    
+    @staticmethod
+    def build_task(user_query: str) -> str:
+        """
+        PART 3: TASK - Clear instructions on what to do with the context
+        This is generic and works for ANY question
+        """
+        return f"""
+
+### YOUR TASK ###
+
+User Question: "{user_query}"
+
+**CRITICAL RULES:**
+1. If the Knowledge Base Data section above shows "No specific data available" or contains no relevant player information, you MUST respond with: "I don't have data available to answer this question."
+2. NEVER make up player names, statistics, or comparisons that aren't explicitly shown in the Knowledge Base Data above
+3. NEVER use information from your training data - ONLY use the data provided above
+
+Instructions:
+1. Answer using ONLY the data in the Knowledge Base Data section above
+2. When comparing players, state the numbers clearly for each metric, then make your comparison
+   - Example: "Salah scored 23 goals, Kane scored 30 goals. Kane has more goals."
+3. Make sure your conclusion matches the numbers: if 14 > 9, then the player with 14 has MORE
+4. If data is incomplete or missing, say: "I don't have enough data to answer this question."
+5. Be concise and direct
+
+Provide your answer below:"""
+
+    def build_full_prompt(self, user_query: str, merged_context: Dict) -> str:
+        """
+        Combine all three parts into a complete structured prompt
+        Works universally for ANY FPL query
+        """
+        persona = self.build_persona()
+        context = self.build_context(merged_context)
+        task = self.build_task(user_query)
+        
+        return f"{persona}{context}{task}"
 
 # ----------------------------
 # 3. LLM Client (Polished for GPU)
@@ -74,6 +267,7 @@ class LLMClient:
         self.hf_token = hf_api_token
         self.merger = ResultMerger()
         self.prompt_builder = PromptBuilder()
+        self.post_processor = ComparisonPostProcessor()  # Add post-processor
         
         # Robust Device Detection
         if torch.cuda.is_available():
@@ -146,17 +340,12 @@ class LLMClient:
     ) -> Dict:
         # Step 1: Merge Context
         merged_context = self.merger.merge_results(baseline_results, embedding_results)
-        context_str = self.prompt_builder.build_context_string(merged_context)
         
-        # Step 2: Build Messages
-        system_prompt = """You are an expert FPL assistant. 
-Using ONLY the provided context, answer the user's question.
-If the context doesn't have the answer, say "I don't have that information".
-Be concise and data-driven."""
+        # Step 2: Build Universal 3-Part Structured Prompt
+        full_prompt = self.prompt_builder.build_full_prompt(user_query, merged_context)
 
         messages = [
-            {"role": "system", "content": system_prompt + "\n\nCONTEXT:\n" + context_str},
-            {"role": "user", "content": user_query}
+            {"role": "system", "content": full_prompt}
         ]
 
         start_time = time.time()
@@ -174,17 +363,27 @@ Be concise and data-driven."""
             
             outputs = self.model.generate(
                 input_ids,
-                max_new_tokens=150,
+                attention_mask=torch.ones_like(input_ids),  # Fix attention mask warning
+                max_new_tokens=200,  # Increased from 150 to prevent cutoff
                 temperature=0.3,
                 do_sample=True,
                 pad_token_id=self.tokenizer.eos_token_id
             )
             
             response_text = self.tokenizer.decode(outputs[0][prompt_length:], skip_special_tokens=True)
+            
+            # **POST-PROCESS: Fix comparison hallucinations**
+            intent = baseline_results.get('intent', 'unknown')
+            response_text = self.post_processor.process_response(
+                response_text.strip(), 
+                intent, 
+                merged_context
+            )
+            
             end_time = time.time()
             
             return {
-                "answer": response_text.strip(),
+                "answer": response_text,
                 "model": self.models[model_name],
                 "model_name": model_name,
                 "response_time": end_time - start_time,
@@ -242,7 +441,7 @@ class ModelEvaluator:
                 report.append(f"❌ ERROR: {result.get('error')}")
                 continue
             report.append(f"⏱️  Time: {result['response_time']:.2f}s")
-            report.append(f"📝 Answer: {result['answer'][:200]}...")
+            report.append(f"📝 Answer: {result['answer']}")
         return "\n".join(report)
 
     def generate_summary_table(self, comparison_results: Dict, evaluations: Dict = None) -> str:

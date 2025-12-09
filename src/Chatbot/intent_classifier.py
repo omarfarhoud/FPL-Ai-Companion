@@ -96,6 +96,20 @@ User: Find me forwards in good form under 8 million
 Assistant: get_recommendation
 User: Show me budget defenders
 Assistant: get_recommendation
+User: Give me a good goalkeeper under 5 million
+Assistant: get_recommendation
+User: Find a goalkeeper under 6m
+Assistant: get_recommendation
+User: Show me cheap goalkeepers
+Assistant: get_recommendation
+User: Recommend a budget keeper
+Assistant: get_recommendation
+User: Give me a goalkeeper with at least 5 cleansheets
+Assistant: get_recommendation
+User: Find me a keeper with good clean sheet record
+Assistant: get_recommendation
+User: Show me goalkeepers with 10+ cleansheets
+Assistant: get_recommendation
 
 User: Who are the top 3 goal scorers?
 Assistant: get_leaderboard
@@ -178,10 +192,10 @@ Assistant: unknown
             return "compare_players"
         
         # Recommendation patterns (find/suggest/recommend + position/budget)
-        if any(keyword in query_lower for keyword in ['find', 'suggest', 'recommend', 'show me', 'need']):
+        if any(keyword in query_lower for keyword in ['find', 'suggest', 'recommend', 'show me', 'need', 'give me', 'get me']):
             if any(indicator in query_lower for indicator in [
-                'forward', 'midfielder', 'defender', 'goalkeeper', 'under', 'budget',
-                'cheap', 'value', 'replacement', 'captain'
+                'forward', 'midfielder', 'defender', 'goalkeeper', 'keeper', 'under', 'budget',
+                'cheap', 'value', 'replacement', 'captain', 'cleansheet', 'clean sheet'
             ]):
                 return "get_recommendation"
         

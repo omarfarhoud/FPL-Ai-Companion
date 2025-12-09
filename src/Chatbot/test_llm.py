@@ -60,8 +60,14 @@ def test_single_model(model_name="llama"):
     # --- PHASE 1: RETRIEVAL ---
     print("📊 Retrieving data (Loading Qwen for Intent)...")
     retriever = FPLHybridRetriever()
-    query = "Who are the top 5 goal scorers?"
-    kg_results = retriever.retrieve(query, use_embeddings=True)
+    query = "Who are the top 3 goal scorers?"
+    kg_results = retriever.retrieve(query, use_embeddings=False)  # Disable embeddings for leaderboard
+    
+    # DEBUG: Print what we got
+    print(f"\n🔍 DEBUG: Got {len(kg_results['baseline'].get('results', []))} result sets")
+    if kg_results['baseline'].get('results'):
+        print(f"🔍 DEBUG: First result has {len(kg_results['baseline']['results'][0].get('data', []))} records")
+        print(f"🔍 DEBUG: Sample data: {kg_results['baseline']['results'][0]['data'][0]}")
     
     # --- PHASE 2: NUCLEAR CLEANUP ---
     print("\n🛑 Closing Retriever...")
@@ -99,12 +105,12 @@ def test_comparison():
     hf_token = load_config()
     print("\n🚀 Initializing Full Comparison...")
     
-    query = "Who are the top 5 goal scorers?"
-    ground_truth = "top 5 goal scoring players with statistics"
+    query = "give me a good goalkeeper with at least 5 cleansheets"
+    ground_truth = "good goalkeeper with at least 5 cleansheets"
     
     print(f"\n📊 Retrieving data...")
     retriever = FPLHybridRetriever()
-    kg_results = retriever.retrieve(query, use_embeddings=True)
+    kg_results = retriever.retrieve(query, use_embeddings=False)  # Disable embeddings for leaderboard
     
     print("\n🛑 Cleaning up Retriever...")
     retriever.close()

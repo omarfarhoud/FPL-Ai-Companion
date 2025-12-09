@@ -83,6 +83,8 @@ class FPLBaselineRetriever:
 
             "fixture_query": [4, 9],               # Fixtures, upcoming
 
+            "get_leaderboard": [12, 13, 14, 15],   # Leaderboard queries (goals, assists, points, bonus)
+
             "unknown": []
 
         }
@@ -115,11 +117,15 @@ class FPLBaselineRetriever:
 
                          sum(r.total_points) AS total_points,
 
-                         avg(r.value) AS avg_value
+                         avg(r.value) AS avg_value,
+
+                         sum(r.clean_sheets) AS clean_sheets
 
                     WHERE total_points > 20
 
-                    RETURN p.player_name, total_points, avg_value
+                      AND ($min_cleansheets IS NULL OR clean_sheets >= $min_cleansheets)
+
+                    RETURN p.player_name, total_points, avg_value, clean_sheets
 
                     ORDER BY total_points DESC
 
@@ -463,11 +469,15 @@ class FPLBaselineRetriever:
 
                          sum(r.total_points) AS total_points,
 
-                         avg(r.value) AS avg_value
+                         avg(r.value) AS avg_value,
+
+                         sum(r.clean_sheets) AS clean_sheets
 
                     WHERE avg_value > 0
 
-                    WITH p, total_points, avg_value,
+                      AND ($min_cleansheets IS NULL OR clean_sheets >= $min_cleansheets)
+
+                    WITH p, total_points, avg_value, clean_sheets,
 
                          (total_points * 1.0 / avg_value) AS points_per_value
 
@@ -477,7 +487,9 @@ class FPLBaselineRetriever:
 
                            avg_value,
 
-                           points_per_value
+                           points_per_value,
+
+                           clean_sheets
 
                     ORDER BY points_per_value DESC
 
@@ -487,6 +499,81 @@ class FPLBaselineRetriever:
 
                 "required": ["position"]
 
+            },
+
+            12: {  # Top goal scorers (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WITH p, pos,
+                         sum(r.goals_scored) AS total_goals,
+                         sum(r.total_points) AS total_points,
+                         avg(r.value) AS avg_value
+                    WHERE total_goals > 0
+                    RETURN p.player_name, 
+                           pos.name AS position,
+                           total_goals,
+                           total_points,
+                           avg_value
+                    ORDER BY total_goals DESC
+                    LIMIT $limit
+                """,
+                "required": []
+            },
+            13: {  # Top assist providers (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WITH p, pos,
+                         sum(r.assists) AS total_assists,
+                         sum(r.total_points) AS total_points,
+                         avg(r.value) AS avg_value
+                    WHERE total_assists > 0
+                    RETURN p.player_name, 
+                           pos.name AS position,
+                           total_assists,
+                           total_points,
+                           avg_value
+                    ORDER BY total_assists DESC
+                    LIMIT $limit
+                """,
+                "required": []
+            },
+            14: {  # Top point scorers (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WITH p, pos,
+                         sum(r.total_points) AS total_points,
+                         avg(r.value) AS avg_value
+                    WHERE total_points > 0
+                    RETURN p.player_name, 
+                           pos.name AS position,
+                           total_points,
+                           avg_value
+                    ORDER BY total_points DESC
+                    LIMIT $limit
+                """,
+                "required": []
+            },
+            15: {  # Top bonus point getters (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WITH p, pos,
+                         sum(r.bonus) AS total_bonus,
+                         sum(r.total_points) AS total_points,
+                         avg(r.value) AS avg_value
+                    WHERE total_bonus > 0
+                    RETURN p.player_name, 
+                           pos.name AS position,
+                           total_bonus,
+                           total_points,
+                           avg_value
+                    ORDER BY total_bonus DESC
+                    LIMIT $limit
+                """,
+                "required": []
             }
 
         }
@@ -600,8 +687,24 @@ class FPLBaselineRetriever:
             else:
 
                 params["max_value"] = 100  # Value is in 10ths (e.g., 100 = £10.0m)
+        
+        # Handle cleansheet constraint
+        if "min_cleansheets" not in params:
+            if "min_cleansheets" in entities and entities["min_cleansheets"]:
+                params["min_cleansheets"] = entities["min_cleansheets"][0] if isinstance(entities["min_cleansheets"], list) else entities["min_cleansheets"]
+            else:
+                params["min_cleansheets"] = None
+        
+        # Handle limit parameter for leaderboard queries
+        if "limit" not in params:
+            # Check if limit was extracted from query and stored in entities
+            if "limit" in entities and entities["limit"]:
+                params["limit"] = int(entities["limit"])
+            else:
+                # Default to 10 if not already extracted from query
+                params["limit"] = 10
 
-           
+       
 
         return params
 
@@ -630,6 +733,12 @@ class FPLBaselineRetriever:
         # Step 2: Extract entities
 
         entities = self.entity_extractor.extract(user_query)
+        
+        # Step 2.5: Extract number from query for "top N" patterns
+        import re
+        numbers = re.findall(r'(?:top|best|first)\s+(\d+)', user_query.lower())
+        if numbers:
+            entities["limit"] = int(numbers[0])
 
         print(f"Extracted Entities: {entities}")
 
