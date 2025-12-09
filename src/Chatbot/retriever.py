@@ -32,37 +32,697 @@ def load_config():
     return config
 
 # ----------------------------
-# 1. Enhanced Baseline Retriever (Kept mostly same, just slight cleanup)
+
+# 1. Enhanced Baseline Retriever (FIXED FOR YOUR SCHEMA)
+
 # ----------------------------
+
 class FPLBaselineRetriever:
+
     def __init__(self):
+
         config = load_config()
+
         self.driver = GraphDatabase.driver(config['URI'], auth=(config['USERNAME'], config['PASSWORD']))
+
+       
+
+        # Initialize NLU components
+
         self.intent_classifier = IntentClassifier()
+
         self.entity_extractor = HybridEntityExtractor()
+
+       
+
+        # Map intents to query templates
+
         self.intent_to_queries = self._init_intent_mapping()
 
+
+
     def close(self):
+
         self.driver.close()
 
+
+
     def _init_intent_mapping(self):
+
+        """Map each intent to relevant query template indices"""
+
         return {
-            "get_player_stats": [1, 10],
-            "get_leaderboard": [12, 13, 14, 15],
-            "compare_players": [5],
-            "get_recommendation": [0, 6, 11, 8],
-            "team_analysis": [2, 7],
-            "fixture_query": [4, 9],
+
+            "get_player_stats": [1, 10],          # Player stats, recent form
+
+            "compare_players": [5],                # Compare players
+
+            "get_recommendation": [0, 6, 11, 8],   # Top by position, budget, value picks, captain
+
+            "team_analysis": [2, 7],               # Team analysis, clean sheets
+
+            "fixture_query": [4, 9],               # Fixtures, upcoming
+
             "unknown": []
+
         }
-    
-    # ... (Include your _get_query_templates and _validate_and_prepare_params methods here) ...
-    # ... (I am omitting them to save space, but keep your existing implementation) ...
+
+
+
+    def _get_query_templates(self):
+
+        """
+
+        Define all 12 query templates MATCHING YOUR SCHEMA
+
+        Key: Stats are on PLAYED_IN relationship, not Player node!
+
+        """
+
+        return {
+
+            0: {  # Top players by position (aggregated across all fixtures)
+
+                "cypher": """
+
+                    MATCH (p:Player)-[:PLAYS_AS]->(pos:Position)
+
+                    MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
+
+                    WHERE pos.name = $position
+
+                    WITH p, pos,
+
+                         sum(r.total_points) AS total_points,
+
+                         avg(r.value) AS avg_value
+
+                    WHERE total_points > 20
+
+                    RETURN p.player_name, total_points, avg_value
+
+                    ORDER BY total_points DESC
+
+                    LIMIT 10
+
+                """,
+
+                "required": ["position"]
+
+            },
+
+            1: {  # Player total stats (aggregated across all fixtures)
+
+                "cypher": """
+
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+
+                    WHERE toLower(p.player_name) CONTAINS toLower($player)
+
+                    WITH p,
+
+                         sum(r.total_points) AS total_points,
+
+                         sum(r.goals_scored) AS goals_scored,
+
+                         sum(r.assists) AS assists,
+
+                         sum(r.minutes) AS minutes_played,
+
+                         avg(r.value) AS avg_value,
+
+                         CASE WHEN toLower(p.player_name) = toLower($player) THEN 0
+
+                              WHEN toLower(p.player_name) ENDS WITH ' ' + toLower($player) THEN 1
+
+                              ELSE 2
+
+                         END AS match_priority
+
+                    ORDER BY match_priority, total_points DESC
+
+                    RETURN p.player_name,
+
+                           total_points,
+
+                           goals_scored,
+
+                           assists,
+
+                           minutes_played,
+
+                           avg_value
+
+                    LIMIT 1
+
+                """,
+
+                "required": ["player"]
+
+            },
+
+            2: {  # Team analysis (players by team from fixtures)
+
+                "cypher": """
+
+                    MATCH (f:Fixture)-[:HAS_HOME_TEAM|HAS_AWAY_TEAM]->(t:Team {name: $team})
+
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f)
+
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+
+                    RETURN pos.name AS position,
+
+                           count(DISTINCT p) AS player_count,
+
+                           avg(r.total_points) AS avg_points,
+
+                           sum(r.total_points) AS total_points
+
+                    ORDER BY total_points DESC
+
+                """,
+
+                "required": ["team"]
+
+            },
+
+            3: {  # Player performance in specific gameweek
+
+                "cypher": """
+
+                    MATCH (gw:Gameweek {GW_number: $gameweek})-[:HAS_FIXTURE]->(f:Fixture)
+
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f)
+
+                    WHERE toLower(p.player_name) CONTAINS toLower($player)
+
+                    RETURN p.player_name,
+
+                           r.total_points,
+
+                           r.goals_scored,
+
+                           r.assists,
+
+                           r.minutes,
+
+                           r.bonus,
+
+                           gw.GW_number
+
+                    LIMIT 1
+
+                """,
+
+                "required": ["player", "gameweek"]
+
+            },
+
+            4: {  # Fixtures for a team
+
+                "cypher": """
+
+                    MATCH (f:Fixture)-[:HAS_HOME_TEAM|HAS_AWAY_TEAM]->(t:Team {name: $team})
+
+                    RETURN f.fixture_number,
+
+                           f.kickoff_time,
+
+                           f.season
+
+                    ORDER BY f.fixture_number
+
+                    LIMIT 10
+
+                """,
+
+                "required": ["team"]
+
+            },
+
+            5: {  # Compare players (aggregated stats) - FUZZY MATCH
+
+                "cypher": """
+
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+
+                    WHERE ANY(name IN $players WHERE toLower(p.player_name) CONTAINS toLower(name))
+
+                    WITH p,
+
+                         sum(r.total_points) AS total_points,
+
+                         sum(r.goals_scored) AS goals_scored,
+
+                         sum(r.assists) AS assists,
+
+                         avg(r.value) AS avg_value
+
+                    RETURN p.player_name,
+
+                           total_points,
+
+                           goals_scored,
+
+                           assists,
+
+                           avg_value
+
+                    ORDER BY total_points DESC
+
+                """,
+
+                "required": ["players"]
+
+            },
+
+            6: {  # Players under budget (by average value) - NO REQUIRED PARAMS
+
+                "cypher": """
+
+                    MATCH (p:Player)-[:PLAYS_AS]->(pos:Position)
+
+                    MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
+
+                    WITH p, pos,
+
+                         avg(r.value) AS avg_value,
+
+                         sum(r.total_points) AS total_points
+
+                    WHERE avg_value <= $max_value AND total_points > 0
+
+                    RETURN p.player_name,
+
+                           total_points,
+
+                           avg_value,
+
+                           pos.name AS position
+
+                    ORDER BY total_points DESC
+
+                    LIMIT 10
+
+                """,
+
+                "required": []  # Changed from ["max_value"] since we provide it as default
+
+            },
+
+            7: {  # Team clean sheet ranking
+
+                "cypher": """
+
+                    MATCH (p:Player)-[:PLAYS_AS]->(pos:Position {name: 'Defender'})
+
+                    MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
+
+                    MATCH (f)-[:HAS_HOME_TEAM|HAS_AWAY_TEAM]->(t:Team)
+
+                    WITH t.name AS team, sum(r.clean_sheets) AS total_clean_sheets
+
+                    RETURN team, total_clean_sheets
+
+                    ORDER BY total_clean_sheets DESC
+
+                    LIMIT 10
+
+                """,
+
+                "required": []
+
+            },
+
+            8: {  # Captain recommendation (top total points)
+
+                "cypher": """
+
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+
+                    WITH p, sum(r.total_points) AS total_points, avg(r.form) AS avg_form
+
+                    RETURN p.player_name,
+
+                           total_points,
+
+                           avg_form
+
+                    ORDER BY total_points DESC
+
+                    LIMIT 5
+
+                """,
+
+                "required": []
+
+            },
+
+            9: {  # Gameweek top scorers
+
+                "cypher": """
+
+                    MATCH (gw:Gameweek {GW_number: $gameweek})-[:HAS_FIXTURE]->(f:Fixture)
+
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f)
+
+                    RETURN p.player_name,
+
+                           sum(r.total_points) AS total_points
+
+                    ORDER BY total_points DESC
+
+                    LIMIT 5
+
+                """,
+
+                "required": ["gameweek"]
+
+            },
+
+            10: {  # Player recent form (last 5 fixtures) - get best match first
+
+                "cypher": """
+
+                    // First, find the best matching player
+
+                    MATCH (p:Player)
+
+                    WHERE toLower(p.player_name) CONTAINS toLower($player)
+
+                    WITH p,
+
+                         CASE
+
+                             WHEN toLower(p.player_name) ENDS WITH ' ' + toLower($player) THEN 0
+
+                             WHEN toLower(p.player_name) = toLower($player) THEN 0
+
+                             ELSE size(p.player_name)
+
+                         END AS match_score
+
+                    ORDER BY match_score
+
+                    LIMIT 1
+
+                    // Then get their recent fixtures
+
+                    MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
+
+                    RETURN p.player_name,
+
+                           f.fixture_number,
+
+                           r.total_points,
+
+                           r.goals_scored,
+
+                           r.assists
+
+                    ORDER BY f.fixture_number DESC
+
+                    LIMIT 5
+
+                """,
+
+                "required": ["player"]
+
+            },
+
+            11: {  # Position-based value picks (points per value)
+
+                "cypher": """
+
+                    MATCH (p:Player)-[:PLAYS_AS]->(pos:Position {name: $position})
+
+                    MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
+
+                    WITH p,
+
+                         sum(r.total_points) AS total_points,
+
+                         avg(r.value) AS avg_value
+
+                    WHERE avg_value > 0
+
+                    WITH p, total_points, avg_value,
+
+                         (total_points * 1.0 / avg_value) AS points_per_value
+
+                    RETURN p.player_name,
+
+                           total_points,
+
+                           avg_value,
+
+                           points_per_value
+
+                    ORDER BY points_per_value DESC
+
+                    LIMIT 10
+
+                """,
+
+                "required": ["position"]
+
+            }
+
+        }
+
+
+
+    def _validate_and_prepare_params(self, entities, required_keys):
+
+        """Validate entities and prepare query parameters"""
+
+        params = {}
+
+       
+
+        # Handle list entities (take first element if list)
+
+        for key in required_keys:
+
+            # Special handling for 'players' key in compare query
+
+            if key == "players":
+
+                # Check both 'players' and 'player' keys
+
+                if "players" in entities and entities["players"]:
+
+                    params[key] = entities["players"] if isinstance(entities["players"], list) else [entities["players"]]
+
+                elif "player" in entities and entities["player"]:
+
+                    params[key] = entities["player"] if isinstance(entities["player"], list) else [entities["player"]]
+
+                else:
+
+                    return None
+
+                continue
+
+           
+
+            if key not in entities or not entities[key]:
+
+                return None  # Missing required entity
+
+           
+
+            value = entities[key]
+
+            extracted_value = value[0] if isinstance(value, list) else value
+
+           
+
+            # Fix invalid season format
+
+            if key == "season" and extracted_value == "YYYY-YY":
+
+                extracted_value = "2023-24"
+
+           
+
+            # Convert gameweek to int if string
+
+            if key == "gameweek":
+
+                try:
+
+                    extracted_value = int(str(extracted_value).replace("GW", "").strip())
+
+                except:
+
+                    extracted_value = 1
+
+           
+
+            params[key] = extracted_value
+
+       
+
+        # Add optional default parameters
+
+        if "season" not in params:
+
+            params["season"] = "2023-24"
+
+        if "gameweek" not in params:
+
+            params["gameweek"] = 1
+
+        if "max_value" not in params:
+
+            # Check for budget in entities and convert
+
+            if "budget" in entities and entities["budget"]:
+
+                budget_str = entities["budget"][0] if isinstance(entities["budget"], list) else entities["budget"]
+
+                # Extract number from strings like "<5m", "5.5", "under 5"
+
+                import re
+
+                numbers = re.findall(r'\d+\.?\d*', str(budget_str))
+
+                if numbers:
+
+                    params["max_value"] = int(float(numbers[0]) * 10)  # Convert to tenths
+
+                else:
+
+                    params["max_value"] = 100
+
+            else:
+
+                params["max_value"] = 100  # Value is in 10ths (e.g., 100 = £10.0m)
+
+           
+
+        return params
+
+
 
     def retrieve(self, user_query):
-        # ... (Keep your existing retrieve logic) ...
-        # For brevity in this answer, assuming your existing baseline logic sits here
-        return {"intent": "unknown", "entities": {}, "results": []} 
+
+        """Main retrieval method"""
+
+        print(f"\n{'='*60}")
+
+        print(f"Processing query: {user_query}")
+
+        print(f"{'='*60}")
+
+       
+
+        # Step 1: Classify intent
+
+        intent = self.intent_classifier.predict(user_query)
+
+        print(f"Classified Intent: {intent}")
+
+       
+
+        # Step 2: Extract entities
+
+        entities = self.entity_extractor.extract(user_query)
+
+        print(f"Extracted Entities: {entities}")
+
+       
+
+        # Step 3: Get relevant query indices for this intent
+
+        query_indices = self.intent_to_queries.get(intent, [])
+
+        if not query_indices:
+
+            return {"intent": intent, "message": "No relevant queries for this intent", "results": []}
+
+       
+
+        # Step 4: Execute relevant queries
+
+        all_results = []
+
+        query_templates = self._get_query_templates()
+
+       
+
+        with self.driver.session() as session:
+
+            for idx in query_indices:
+
+                template = query_templates[idx]
+
+               
+
+                # Prepare parameters
+
+                params = self._validate_and_prepare_params(entities, template["required"])
+
+               
+
+                if params is None:
+
+                    print(f"⚠ Query {idx} skipped: missing required entities {template['required']}")
+
+                    continue
+
+               
+
+                try:
+
+                    print(f"\n→ Executing Query {idx}")
+
+                    print(f"  Parameters: {params}")
+
+                   
+
+                    result = session.run(template["cypher"], params)
+
+                    records = [dict(record) for record in result]
+
+                   
+
+                    if records:
+
+                        all_results.append({
+
+                            "query_id": idx,
+
+                            "data": records
+
+                        })
+
+                        print(f"  ✓ Retrieved {len(records)} records")
+
+                    else:
+
+                        print(f"  ⚠ No results found")
+
+                       
+
+                except Exception as e:
+
+                    print(f"  ✗ Query {idx} failed: {e}")
+
+       
+
+        return {
+
+            "intent": intent,
+
+            "entities": entities,
+
+            "results": all_results
+
+        }
+
 
 
 # ----------------------------
