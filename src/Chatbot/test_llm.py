@@ -1,107 +1,153 @@
+import sys
+import os
+import argparse
+import dotenv
+import gc
+import torch
+from transformers import PreTrainedModel
+# 1. FIX: Handle fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 from retriever import FPLHybridRetriever
 from llm_client import LLMClient, ModelEvaluator
 
-def test_dynamic_limit():
-    """Test dynamic LIMIT extraction without LLM calls"""
-    
-    # Initialize
-    print("\n🚀 Initializing FPL Retriever...")
-    retriever = FPLHybridRetriever()
-    
-    # Test cases with different limits
-    test_queries = [
-        ("Who are the top 3 goal scorers?", 3),
-        ("Show me the best 5 assist providers", 5),
-        ("Top 10 point scorers this season", 10),
-        ("Who are the top goal scorers?", 10),  # No number - should default to 10
-    ]
-    
-    print("\n" + "="*80)
-    print("TESTING DYNAMIC LIMIT EXTRACTION")
-    print("="*80)
-    
-    for query, expected_limit in test_queries:
-        print(f"\n{'='*60}")
-        print(f"Query: {query}")
-        print(f"Expected Limit: {expected_limit}")
-        print(f"{'='*60}")
-        
-        # Get KG results (without semantic embeddings for speed)
-        kg_results = retriever.retrieve(query, use_embeddings=False)
-        
-        # Check if limit was applied correctly
-        baseline = kg_results.get('baseline', {})
-        if baseline.get('results'):
-            actual_records = len(baseline['results'][0]['data'])
-            print(f"\n✓ Results: {actual_records} records returned")
-            if actual_records == expected_limit:
-                print(f"✅ PASS: Got expected {expected_limit} records")
-            else:
-                print(f"❌ FAIL: Expected {expected_limit} but got {actual_records}")
-        else:
-            print("\n⚠ No results returned")
-    
-    # Cleanup
-    retriever.close()
-    print("\n✅ Testing complete!")
+def load_config():
+    """Load env variables dynamically"""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    dotenv_path = os.path.join(current_dir, '.env')
+    loaded = dotenv.load_dotenv(dotenv_path)
+    if not loaded: loaded = dotenv.load_dotenv(dotenv.find_dotenv())
+    if not loaded:
+        print("\n❌ Error: Could not find .env file.")
+        sys.exit(1)
+    token = os.getenv("HF_API_TOKEN")
+    if not token:
+        print("\n❌ Error: HF_API_TOKEN variable is missing from your .env file.")
+        sys.exit(1)
+    return token
 
-def test_llm_system():
-    """Test complete LLM integration with all three models"""
+def nuclear_cleanup():
+    """Aggressively hunt down and destroy models in VRAM"""
+    print("🧹 Starting Nuclear VRAM Cleanup...")
     
-    # Initialize
-    print("\n🚀 Initializing FPL AI System...")
+    # 1. Force Python Garbage Collection
+    gc.collect()
+    
+    # 2. Hunt for any HuggingFace models still in memory
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, PreTrainedModel):
+                print(f"   💀 Killing lingering model: {type(obj).__name__}")
+                obj.cpu() # Move to CPU first
+                del obj
+        except Exception:
+            pass # Ignore errors accessing objects
+            
+    # 3. Clear CUDA Cache
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+    # 4. Report Free Memory
+    if torch.cuda.is_available():
+        free_mem = torch.cuda.mem_get_info()[0] / 1024**3
+        print(f"   ✨ GPU Free Memory: {free_mem:.2f} GB")
+
+def test_single_model(model_name="llama"):
+    hf_token = load_config()
+    print(f"\n🚀 Initializing Single Model Test: {model_name.upper()}...")
+    
+    # --- PHASE 1: RETRIEVAL ---
+    print("📊 Retrieving data (Loading Qwen for Intent)...")
     retriever = FPLHybridRetriever()
-    client = LLMClient()
-    evaluator = ModelEvaluator()
+    query = "Who are the top 5 goal scorers?"
+    kg_results = retriever.retrieve(query, use_embeddings=True)
     
-    # Test queries
-    test_cases = [
-            {
-                "query": "Who are the top 5 goal scorers?",
-                "ground_truth": "top 5 goal scoring players with statistics"
-            }
-        ]
+    # --- PHASE 2: NUCLEAR CLEANUP ---
+    print("\n🛑 Closing Retriever...")
+    retriever.close()
+    del retriever # Delete local reference
+    nuclear_cleanup() # Kill the actual Qwen model objects
     
-    for i, case in enumerate(test_cases, 1):
-        print(f"\n{'='*80}")
-        print(f"TEST CASE {i}/{len(test_cases)}")
-        print(f"{'='*80}")
-        print(f"Query: {case['query']}")
-        
-        # Step 1: Get KG results
-        print("\n📊 Retrieving from Knowledge Graph...")
-        kg_results = retriever.retrieve(case['query'], use_embeddings=True)
-        
-        # Step 2: Compare all three models
-        print("\n🤖 Generating responses with 3 models...")
-        comparison = client.compare_models(
-            case['query'],
-            kg_results['baseline'],
-            kg_results['semantic_search']
+    # --- PHASE 3: GENERATION ---
+    print(f"\n🤖 Generating response with {model_name}...")
+    client = LLMClient(hf_api_token=hf_token)
+    
+    try:
+        result = client.generate_response(
+            query, 
+            kg_results['baseline'], 
+            kg_results['semantic_search'], 
+            model_name=model_name
         )
         
-        # Step 3: Evaluate each model
-        evaluations = {}
-        for model_name in ["llama", "qwen", "phi3"]:
-            if comparison[model_name].get("success"):
-                evaluations[model_name] = evaluator.evaluate_response(
-                    comparison[model_name],
-                    ground_truth=case['ground_truth']
-                )
-        
-        # Step 4: Print results
-        print(evaluator.compare_models_report(comparison, evaluations))
-        print(evaluator.generate_summary_table(comparison, evaluations))
+        if result['success']:
+            print(f"\n{'='*60}")
+            print(f"RESPONSE ({result['response_time']:.2f}s)")
+            print(f"{'='*60}")
+            print(result['answer'])
+            print(f"{'='*60}")
+        else:
+            print(f"\n❌ Error: {result.get('error')}")
+            
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            print("\n❌ OOM Error! The model is still too big for 6GB VRAM.")
+            print("   Try using 'smollm' which is smaller.")
+
+def test_comparison():
+    hf_token = load_config()
+    print("\n🚀 Initializing Full Comparison...")
     
-    # Cleanup
+    query = "Who are the top 5 goal scorers?"
+    ground_truth = "top 5 goal scoring players with statistics"
+    
+    print(f"\n📊 Retrieving data...")
+    retriever = FPLHybridRetriever()
+    kg_results = retriever.retrieve(query, use_embeddings=True)
+    
+    print("\n🛑 Cleaning up Retriever...")
     retriever.close()
-    print("\nTesting complete!")
+    del retriever
+    nuclear_cleanup()
+    
+    print("\n🤖 Looping through models...")
+    client = LLMClient(hf_api_token=hf_token)
+    evaluator = ModelEvaluator()
+    
+    # Run compare but force cleanup BETWEEN models
+    comparison = {}
+    for name in ["llama", "qwen", "smollm"]:
+        print(f"\n--- Testing {name.upper()} ---")
+        nuclear_cleanup() # Clean before each load
+        result = client.generate_response(query, kg_results['baseline'], kg_results['semantic_search'], name)
+        comparison[name] = result
+        if result['success']:
+             print(f"✓ Success ({result['response_time']:.2f}s)")
+        else:
+             print(f"✗ Failed: {result.get('error')}")
+
+    evaluations = {}
+    for name, result in comparison.items():
+        if result.get("success"):
+            evaluations[name] = evaluator.evaluate_response(result, ground_truth=ground_truth)
+            
+    print(evaluator.compare_models_report(comparison, evaluations))
+    print(evaluator.generate_summary_table(comparison, evaluations))
 
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", action="store_true")
+    parser.add_argument("--compare", action="store_true")
+    parser.add_argument("--model", type=str, default="llama", choices=["llama", "qwen", "smollm"])
+    args = parser.parse_args()
     
-    # Check command line arguments
-    if len(sys.argv) > 1 and sys.argv[1] == "--test-limit":
-        test_dynamic_limit()
+    if args.limit:
+        # Simple retrieval test
+        retriever = FPLHybridRetriever()
+        retriever.retrieve("Test", use_embeddings=False)
+        retriever.close()
+    elif args.compare:
+        test_comparison()
     else:
-        test_llm_system()
+        test_single_model(args.model)
