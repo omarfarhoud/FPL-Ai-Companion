@@ -89,3 +89,5 @@ target/
 .mypy_cache/
 src/Chatbot/fpl_index_*.index
 src/Chatbot/fpl_index_*.index
+src/Chatbot/fpl_index_*.index
+src/Chatbot/fpl_metadata.pkl
