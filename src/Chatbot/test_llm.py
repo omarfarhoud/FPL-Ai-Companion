@@ -11,6 +11,46 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from retriever import FPLHybridRetriever
 from llm_client import LLMClient, ModelEvaluator
 
+# Test query suite covering different intents
+TEST_QUERIES = {
+    # Player Stats
+    "player_stats": "Show me Mohamed Salah's stats",
+    "player_form": "How is Kane doing?",
+    
+    # Comparisons
+    "comparison": "Compare Mohamed Salah and Harry Kane",
+    "comparison_short": "Salah vs Haaland",
+    
+    # Recommendations by Position
+    "goalkeeper": "Give me a good goalkeeper with at least 5 cleansheets",
+    "goalkeeper_budget": "Recommend a goalkeeper under 5 million",
+    "defender": "Recommend a defender under 4.5m",
+    "defender_cleansheets": "Show me defenders with 5+ cleansheets",
+    "midfielder": "Recommend a midfielder under 8 million",
+    "forward": "Give me a forward under 7m",
+    
+    # Budget/Valuefixtures
+    "budget_players": "Show me players under 5 million",
+    "value_picks": "Best value picks under 7 million",
+    
+    # Team Analysis
+    "team_stats": "How is Liverpool doing?",
+    "team_cleansheets": "Which team has the most clean sheets?",
+    "liverpool": "how many cleansheets does liverpool have",
+    # Fixtures
+    "fixtures": "Show me fixtures for Liverpool",
+    
+    # Leaderboards
+    "top_scorers": "Who are the top goal scorers?",
+    "top_scorers_limit": "Show me top 20 goal scorers",
+    "top_assists": "Top assist providers",
+    "top_points": "Show me top 15 players by points",
+    "top_bonus": "Who gets the most bonus points?",
+    
+    # Captain
+    "captain": "Who should I captain this week?",
+}
+
 def load_config():
     """Load env variables dynamically"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -101,12 +141,12 @@ def test_single_model(model_name="llama"):
             print("\n❌ OOM Error! The model is still too big for 6GB VRAM.")
             print("   Try using 'smollm' which is smaller.")
 
-def test_comparison():
+def test_comparison(query_key="player_stats"):
     hf_token = load_config()
     print("\n🚀 Initializing Full Comparison...")
     
-    query = "give me a good goalkeeper with at least 5 cleansheets"
-    ground_truth = "good goalkeeper with at least 5 cleansheets"
+    query = TEST_QUERIES.get(query_key, query_key)  # Allow custom queries too
+    ground_truth = ""
     
     print(f"\n📊 Retrieving data...")
     retriever = FPLHybridRetriever()
@@ -146,6 +186,8 @@ if __name__ == "__main__":
     parser.add_argument("--limit", action="store_true")
     parser.add_argument("--compare", action="store_true")
     parser.add_argument("--model", type=str, default="llama", choices=["llama", "qwen", "smollm"])
+    parser.add_argument("--query", type=str, default="player_stats",
+                       help="Query to test (key from TEST_QUERIES or custom query)")
     args = parser.parse_args()
     
     if args.limit:
@@ -154,6 +196,6 @@ if __name__ == "__main__":
         retriever.retrieve("Test", use_embeddings=False)
         retriever.close()
     elif args.compare:
-        test_comparison()
+        test_comparison(args.query)
     else:
         test_single_model(args.model)

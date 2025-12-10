@@ -64,9 +64,17 @@ User: How many points did Haaland get last week?
 Assistant: get_player_stats
 User: How many goals does Salah have?
 Assistant: get_player_stats
-User: Show me Watkins’ recent stats.
+User: Show me Watkins' recent stats.
 Assistant: get_player_stats
 User: What is Fernandes' current form like?
+Assistant: get_player_stats
+User: Show me Mohamed Salah's stats
+Assistant: get_player_stats
+User: Tell me about Harry Kane
+Assistant: get_player_stats
+User: What are Haaland's numbers?
+Assistant: get_player_stats
+User: Stats for Saka
 Assistant: get_player_stats
 
 User: Should I start Pickford or Raya?
@@ -187,36 +195,64 @@ Assistant: unknown
         # Rule-based fallback for common patterns
         query_lower = user_query.lower()
         
-        # Comparison patterns
+        # Comparison patterns (check FIRST)
         if 'compare' in query_lower or ' vs ' in query_lower or ' versus ' in query_lower:
             return "compare_players"
+        
+        # Team analysis patterns (check BEFORE player stats to avoid confusion)
+        team_names = ['liverpool', 'arsenal', 'chelsea', 'manchester', 'city', 'united', 
+                      'tottenham', 'spurs', 'brighton', 'newcastle', 'villa', 'west ham']
+        if any(team in query_lower for team in team_names) or any(keyword in query_lower for keyword in ['team', 'teams', 'club', 'clubs', 'side']):
+            if any(pattern in query_lower for pattern in [
+                'how is', 'how are', 'doing', 'performing', 'performance', 'form', 
+                'clean sheet', 'cleansheet', 'defensive', 'strong', 'weak', 'improving', 'struggling',
+                'how many'
+            ]):
+                return "team_analysis"
+        
+        # Player stats patterns
+        if any(pattern in query_lower for pattern in [
+            'stats', 'statistics', 'numbers', 'performance', 'how is',
+            'how has', 'how did', 'tell me about', 'show me about'
+        ]):
+            # Make sure it's not a team query or comparison
+            if 'compare' not in query_lower and ' vs ' not in query_lower:
+                if not any(keyword in query_lower for keyword in ['team', 'teams', 'which team']):
+                    return "get_player_stats"
+        
+        # Fixture patterns (check BEFORE recommendations to avoid false positives)
+        if any(keyword in query_lower for keyword in ['fixture', 'fixtures', 'match', 'matches', 'game', 'games']):
+            return "fixture_query"
+        if any(pattern in query_lower for pattern in ['play next', 'face next', 'upcoming', 'next gw', 'double gameweek']):
+            return "fixture_query"
+        
+        # Captain queries (specific pattern for captain recommendations)
+        if 'captain' in query_lower and any(word in query_lower for word in ['who', 'should', 'which', 'best']):
+            return "get_recommendation"
+        
+        # Leaderboard patterns (for PLAYERS) - check BEFORE recommendations
+        if any(pattern in query_lower for pattern in [
+            'top', 'best', 'most', 'highest', 'leading', 'leaderboard',
+            'who scored', 'who has', 'which player', 'show me', 'give me'
+        ]) and any(stat in query_lower for stat in [
+            'goal', 'assist', 'point', 'scorer', 'score', 'cleansheet', 'clean sheet'
+        ]):
+            # Make sure it's not about teams
+            if not any(keyword in query_lower for keyword in ['team', 'teams', 'club', 'clubs']):
+                # Check if it includes a position (defender, midfielder, etc.)
+                if any(pos in query_lower for pos in ['defender', 'midfielder', 'forward', 'goalkeeper', 'keeper']):
+                    return "get_leaderboard"
+                # Or if it has leaderboard indicators
+                if any(pattern in query_lower for pattern in ['top', 'best', 'most', 'highest', 'leading', 'leaderboard']):
+                    return "get_leaderboard"
         
         # Recommendation patterns (find/suggest/recommend + position/budget)
         if any(keyword in query_lower for keyword in ['find', 'suggest', 'recommend', 'show me', 'need', 'give me', 'get me']):
             if any(indicator in query_lower for indicator in [
                 'forward', 'midfielder', 'defender', 'goalkeeper', 'keeper', 'under', 'budget',
-                'cheap', 'value', 'replacement', 'captain', 'cleansheet', 'clean sheet'
+                'cheap', 'value', 'replacement', 'captain'
             ]):
                 return "get_recommendation"
-        
-        # Team analysis patterns (check BEFORE leaderboard)
-        if any(keyword in query_lower for keyword in ['team', 'teams', 'club', 'clubs', 'side']):
-            if any(pattern in query_lower for pattern in [
-                'clean sheet', 'defensive', 'performing', 'form', 'strong', 'weak',
-                'improving', 'struggling'
-            ]):
-                return "team_analysis"
-        
-        # Leaderboard patterns (for PLAYERS)
-        if any(pattern in query_lower for pattern in [
-            'top', 'best', 'most', 'highest', 'leading', 'leaderboard',
-            'who scored', 'who has', 'which player'
-        ]) and any(stat in query_lower for stat in [
-            'goal', 'assist', 'point', 'scorer', 'score'
-        ]):
-            # Make sure it's not about teams
-            if not any(keyword in query_lower for keyword in ['team', 'teams', 'club', 'clubs']):
-                return "get_leaderboard"
         
         # Continue with LLM-based classification
         user_line = f"User: {user_query}\nAssistant:"

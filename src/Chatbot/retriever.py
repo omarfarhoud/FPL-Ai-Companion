@@ -84,7 +84,7 @@ class FPLBaselineRetriever:
 
             "fixture_query": [4, 9],               # Fixtures, upcoming
 
-            "get_leaderboard": [12, 13, 14, 15],   # Leaderboard queries (goals, assists, points, bonus)
+            "get_leaderboard": [16, 12, 13, 14, 15],   # Leaderboard queries (cleansheets first, then goals, assists, points, bonus)
 
             "unknown": []
 
@@ -338,21 +338,23 @@ class FPLBaselineRetriever:
 
             },
 
-            7: {  # Team clean sheet ranking
+            7: {  # Team clean sheet ranking (count fixtures with 0 goals conceded)
 
                 "cypher": """
 
-                    MATCH (p:Player)-[:PLAYS_AS]->(pos:Position {name: 'Defender'})
-
-                    MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
 
                     MATCH (f)-[:HAS_HOME_TEAM|HAS_AWAY_TEAM]->(t:Team)
 
-                    WITH t.name AS team, sum(r.clean_sheets) AS total_clean_sheets
+                    WITH t, f, sum(r.goals_conceded) AS team_goals_conceded
 
-                    RETURN team, total_clean_sheets
+                    WHERE team_goals_conceded = 0
 
-                    ORDER BY total_clean_sheets DESC
+                    WITH t.name AS team, count(DISTINCT f) AS clean_sheets
+
+                    RETURN team, clean_sheets
+
+                    ORDER BY clean_sheets DESC
 
                     LIMIT 10
 
@@ -575,6 +577,27 @@ class FPLBaselineRetriever:
                     LIMIT $limit
                 """,
                 "required": []
+            },
+            16: {  # Top clean sheet keepers (leaderboard)
+                "cypher": """
+                    MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+                    MATCH (p)-[:PLAYS_AS]->(pos:Position)
+                    WHERE ($position IS NULL OR pos.name = $position)
+                    WITH p, pos,
+                         sum(r.clean_sheets) AS total_clean_sheets,
+                         sum(r.total_points) AS total_points,
+                         avg(r.value) AS avg_value
+                    WHERE total_clean_sheets > 0
+                      AND ($min_cleansheets IS NULL OR total_clean_sheets >= $min_cleansheets)
+                    RETURN p.player_name, 
+                           pos.name AS position,
+                           total_clean_sheets,
+                           total_points,
+                           avg_value
+                    ORDER BY total_clean_sheets DESC
+                    LIMIT $limit
+                """,
+                "required": []
             }
 
         }
@@ -704,6 +727,13 @@ class FPLBaselineRetriever:
             else:
                 # Default to 10 if not already extracted from query
                 params["limit"] = 10
+        
+        # Handle position parameter (optional for leaderboard queries)
+        if "position" not in params:
+            if "position" in entities and entities["position"]:
+                params["position"] = entities["position"][0] if isinstance(entities["position"], list) else entities["position"]
+            else:
+                params["position"] = None
 
        
 

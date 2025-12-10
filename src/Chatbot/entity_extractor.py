@@ -29,8 +29,8 @@ METRICS = ["goals", "goal scorer", "goal scorers", "scorer", "assists", "points"
 # Budget pattern - captures "under X", "<X", "below X", etc.
 BUDGET_PATTERN = r'(?:under|below|less than|<|maximum|max)\s*[£$]?\s*(\d+\.?\d*)\s*(?:m|million)?'
 
-# Cleansheet pattern - captures "at least X", ">X", "more than X" cleansheets
-CLEANSHEET_PATTERN = r'(?:at least|minimum|min|>=?|more than)\s*(\d+)\s*(?:clean\s*sheets?|cleansheets?)'
+# Cleansheet pattern - captures "at least X", ">X", "5+", "more than X" cleansheets
+CLEANSHEET_PATTERN = r'(?:at least|minimum|min|>=?|more than|\d+\+)\s*(\d+)\s*(?:clean\s*sheets?|cleansheets?)|(\d+)\+\s*(?:clean\s*sheets?|cleansheets?)'
 
 GAMEWEEKS = [f"GW{i}" for i in range(1, 39)]
 SEASON_PATTERN = r"\b(20\d{2})[-/](\d{2})\b"
@@ -138,7 +138,9 @@ class HybridEntityExtractor:
         # Extract cleansheet constraints
         cleansheet_match = re.search(CLEANSHEET_PATTERN, query, re.I)
         if cleansheet_match:
-            entities["min_cleansheets"] = [int(cleansheet_match.group(1))]
+            # Pattern has two groups - get whichever matched
+            threshold = cleansheet_match.group(1) or cleansheet_match.group(2)
+            entities["min_cleansheets"] = [int(threshold)]
 
         # --- LLM fallback for missing entities ---
         required_keys = ["player", "team", "position", "metric", "season", "gameweek"]
