@@ -4,6 +4,7 @@ import numpy as np
 import faiss  # <--- NEW IMPORT
 from neo4j import GraphDatabase
 from sentence_transformers import SentenceTransformer
+import torch
 
 # Import your custom classes
 from intent_classifier import IntentClassifier
@@ -834,19 +835,21 @@ class FPLBaselineRetriever:
 
 
 
-# ----------------------------
-# 2. Embedding Retriever
-# ----------------------------
+import os
+import pickle
+import faiss
+import pandas as pd
+from neo4j import GraphDatabase
+from sentence_transformers import SentenceTransformer
+
 class FPLEmbeddingRetriever:
     def __init__(self):
-        config = load_config()
-        self.driver = GraphDatabase.driver(config['URI'], auth=(config['USERNAME'], config['PASSWORD']))
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.meta_path = os.path.join(self.base_dir, "fpl_metadata.pkl")
         self.index_paths = {
             "model1": os.path.join(self.base_dir, "fpl_index_m1.index"),
             "model2": os.path.join(self.base_dir, "fpl_index_m2.index")
         }
-        self.meta_path = os.path.join(self.base_dir, "fpl_metadata.pkl")
         self.model_configs = {
             "model1": "sentence-transformers/all-MiniLM-L6-v2",
             "model2": "sentence-transformers/all-mpnet-base-v2"
@@ -854,22 +857,25 @@ class FPLEmbeddingRetriever:
         self.loaded_models = {}
         self.faiss_indices = {}
         self.metadata_map = []
+
+        # Optional: Neo4j connection
+        # config = self._load_config()
+        # self.driver = GraphDatabase.driver(config['URI'], auth=(config['USERNAME'], config['PASSWORD']))
+
         self._load_resources()
 
     def close(self):
-        self.driver.close()
+        if hasattr(self, "driver"):
+            self.driver.close()
 
-    def _get_model(self, model_key):
-        if model_key not in self.loaded_models:
-            print(f"⏳ Loading {model_key} ({self.model_configs[model_key]})...")
-            self.loaded_models[model_key] = SentenceTransformer(self.model_configs[model_key], device="cpu")
-        return self.loaded_models[model_key]
-
+    # ----------------------------
+    # Load FAISS + metadata
+    # ----------------------------
     def _load_resources(self):
         if os.path.exists(self.meta_path):
             with open(self.meta_path, "rb") as f:
                 self.metadata_map = pickle.load(f)
-            print(f"✓ Loaded metadata for {len(self.metadata_map)} players.")
+            print(f"✓ Loaded metadata for {len(self.metadata_map)} rows.")
         else:
             print("⚠ No metadata found on disk.")
 
@@ -883,80 +889,98 @@ class FPLEmbeddingRetriever:
             else:
                 print(f"⚠ Index for {key} not found.")
 
-    def rebuild_indices(self):
-        print("\n=== REBUILDING INDICES FROM NEO4J ===")
-        player_data = self._fetch_data_from_neo4j()
+    # ----------------------------
+    # Internal: Load model
+    # ----------------------------
+    def _get_model(self, model_key, device="cpu"):
+        if model_key not in self.loaded_models:
+            print(f"⏳ Loading {model_key} ({self.model_configs[model_key]}) on {device}...")
+            self.loaded_models[model_key] = SentenceTransformer(self.model_configs[model_key], device=device)
+        return self.loaded_models[model_key]
+
+    # ----------------------------
+    # Load CSV and create text for embeddings
+    # ----------------------------
+    def _fetch_data_from_csv(self):
+        csv_path = os.path.join(self.base_dir, "..", "kg", "fpl_two_seasons.csv")
+        csv_path = os.path.abspath(csv_path)
+        print(f"📄 Loading CSV from: {csv_path}")
+
+        df = pd.read_csv(csv_path)
+        df.columns = [c.strip() for c in df.columns]
+
+        player_data = []
+        for _, row in df.iterrows():
+            # Make a descriptive text of **all relevant info**
+            text = " | ".join(
+                [f"{col}: {row[col]}" for col in df.columns if pd.notnull(row[col])]
+            )
+            entry = row.to_dict()
+            entry["text_representation"] = text
+            player_data.append(entry)
+
+        print(f"✓ Loaded {len(player_data)} rows from CSV.")
+        return player_data
+
+    # ----------------------------
+    # Rebuild indices
+    # ----------------------------
+    def rebuild_indices(self, use_gpu=True):
+        print("\n=== REBUILDING INDICES FROM CSV ===")
+        player_data = self._fetch_data_from_csv()
         if not player_data:
-            print("No data found in Neo4j.")
+            print("No data found in CSV.")
             return
+
         self.metadata_map = player_data
 
         for model_key in self.model_configs:
-            model = self._get_model(model_key)
+            device = "cuda" if use_gpu else "cpu"
+            model = self._get_model(model_key, device=device)
             texts = [p['text_representation'] for p in player_data]
-            embeddings = model.encode(texts, show_progress_bar=True)
-            dimension = embeddings.shape[1]
-            index = faiss.IndexFlatL2(dimension)
+
+            print(f"⏳ Embedding {len(texts)} rows with {model_key} on {device}...")
+            embeddings = model.encode(texts, show_progress_bar=True, batch_size=128, convert_to_numpy=True).astype("float32")
+            
+            dim = embeddings.shape[1]
+            index = faiss.IndexFlatL2(dim)
             index.add(embeddings)
             self.faiss_indices[model_key] = index
             faiss.write_index(index, self.index_paths[model_key])
             print(f"✓ Saved {model_key} index to {self.index_paths[model_key]}")
 
+            # Clear GPU memory after each model
+            if use_gpu:
+                del model
+                torch.cuda.empty_cache()
+                print(f"♻ Cleared GPU memory after {model_key}")
+
+        # Save metadata
         with open(self.meta_path, "wb") as f:
             pickle.dump(self.metadata_map, f)
         print(f"✓ Saved metadata to {self.meta_path}")
 
-    def _fetch_data_from_neo4j(self):
-        data = []
-        with self.driver.session() as session:
-            result = session.run("""
-                MATCH (p:Player)-[:PLAYS_AS]->(pos:Position)
-                MATCH (p)-[r:PLAYED_IN]->(f:Fixture)
-                WITH p, pos,
-                     sum(r.total_points) AS total_points,
-                     sum(r.goals_scored) AS goals,
-                     sum(r.assists) AS assists,
-                     avg(r.value) AS avg_value,
-                     avg(r.form) AS avg_form
-                RETURN p.player_name AS name,
-                       pos.name AS position,
-                       total_points, goals, assists, 
-                       avg_value, avg_form
-            """)
-            for r in result:
-                avg_val = round(r['avg_value']/10.0, 1) if r['avg_value'] else 0
-                avg_form = round(r['avg_form'], 2) if r['avg_form'] else 0
-                text = (
-                    f"Name: {r['name']}. "
-                    f"Position: {r['position']}. "
-                    f"Price: £{avg_val}m. "
-                    f"Stats: {r['total_points']} points, {r['goals']} goals, {r['assists']} assists. "
-                    f"Form: {avg_form}."
-                )
-                entry = {
-                    "name": r['name'],
-                    "position": r['position'],
-                    "total_points": r['total_points'],
-                    "price": avg_val,
-                    "text_representation": text
-                }
-                data.append(entry)
-        return data
-
-    def search(self, query, model_name="model1", top_k=5):
+    # ----------------------------
+    # Query FAISS
+    # ----------------------------
+    def search(self, query, model_name, top_k):
         if model_name not in self.faiss_indices:
             return []
-        model = self._get_model(model_name)
-        query_vec = model.encode([query]).astype("float32")
-        index = self.faiss_indices[model_name]
-        D, I = index.search(query_vec, top_k)
+
+        model = self._get_model(model_name, device="cpu")
+        query_vec = model.encode([query], convert_to_numpy=True).astype("float32")
+        D, I = self.faiss_indices[model_name].search(query_vec, top_k)
+
         results = []
         for rank, idx in enumerate(I[0]):
             if idx != -1 and idx < len(self.metadata_map):
                 item = self.metadata_map[idx].copy()
                 item['score'] = float(D[0][rank])
                 results.append(item)
+
         return results
+
+
 
 # ----------------------------
 # 3. Hybrid Retriever
@@ -966,12 +990,12 @@ class FPLHybridRetriever:
         self.baseline = FPLBaselineRetriever()
         self.embedding = FPLEmbeddingRetriever()
 
-    def retrieve(self, user_query, use_embeddings=True, model_choice="model1"):
+    def retrieve(self, user_query, use_embeddings=True, model_choice="model2"):
         baseline_results = self.baseline.retrieve(user_query)
 
         semantic_results = {}
         if use_embeddings:
-            results = self.embedding.search(user_query, model_name=model_choice, top_k=5)
+            results = self.embedding.search(user_query, model_name=model_choice, top_k=50)
             semantic_results[model_choice] = results
 
         # Optional: fill baseline results if empty
@@ -998,7 +1022,7 @@ if __name__ == "__main__":
         hybrid.embedding.rebuild_indices()
         hybrid.embedding._load_resources()
 
-    query = "High scoring defenders under 5m"
+    query = "Show me the fixtures for liverpool"
     response = hybrid.retrieve(query, model_choice="model1")
     print("=== Retrieval Results ===")
     print(response)

@@ -204,7 +204,8 @@ if submit_btn and query:
             with st.expander("View Full Prompt Sent to LLM"):
                 # Reconstruct prompt to show user
                 merged = llm_client.merger.merge_results(baseline_data, semantic_data)
-                context_str = llm_client.prompt_builder.build_context_string(merged)
+                context_str = llm_client.prompt_builder.build_full_prompt(    user_query=query,
+    merged_context=merged)
                 st.text(context_str)
         else:
             st.error(f"LLM Generation Failed: {llm_response.get('error')}")
