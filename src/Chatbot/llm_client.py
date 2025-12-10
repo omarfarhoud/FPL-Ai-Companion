@@ -161,13 +161,13 @@ class PromptBuilder:
         return """You are an FPL (Fantasy Premier League) expert assistant with comprehensive knowledge of:
 
 • Player Performance Analysis: Goals, assists, points, form, value
-• Team Dynamics: Clean sheets, fixtures, team statistics
+• Team Dynamics: Clean sheets, fixtures, team statistics, match schedules
 • Strategic Recommendations: Budget optimization, captain picks, differential players
 • Historical Data: Season trends, player comparisons, statistical patterns
 
 Your approach:
-- Provide accurate, data-driven insights
-- Base ALL answers strictly on the provided knowledge base data
+- Provide accurate, data-driven insights based on the Knowledge Base Data provided
+- Answer questions about players, teams, fixtures, and statistics using the database results
 - Include relevant statistics to support your responses
 - Acknowledge when information is insufficient"""
 
@@ -192,7 +192,8 @@ Your approach:
         # Format structured database results
         if merged_context.get("structured_data"):
             context_parts.append("**Database Query Results:**")
-            for i, item in enumerate(merged_context["structured_data"][:15], 1):
+            # Limit to 10 items to avoid overwhelming small models
+            for i, item in enumerate(merged_context["structured_data"][:10], 1):
                 # Clean up field names (remove prefixes, format nicely)
                 formatted_fields = []
                 for key, value in item.items():
@@ -234,17 +235,32 @@ Your approach:
 User Question: "{user_query}"
 
 **CRITICAL RULES:**
-1. If the Knowledge Base Data section above shows "No specific data available" or contains no relevant player information, you MUST respond with: "I don't have data available to answer this question."
-2. NEVER make up player names, statistics, or comparisons that aren't explicitly shown in the Knowledge Base Data above
-3. NEVER use information from your training data - ONLY use the data provided above
+1. Look at the "Database Query Results" section above:
+   - If it says "No specific data available" → respond: "I don't have data available to answer this question."
+   - If it shows numbered results (1. 2. 3. etc.) → USE ONLY that data to answer
+2. NEVER add details not in the data (e.g., if opponent teams aren't listed, don't name them)
+3. Only state information explicitly shown in the database results
+4. DO NOT filter or limit your answer to specific positions unless explicitly asked
+   - For "Who should I captain?" consider ALL players in the data, not just one position
+   - The data provided is already filtered appropriately
+5. Answer ONLY what the user asked - do not add extra recommendations or unrelated information
 
 Instructions:
 1. Answer using ONLY the data in the Knowledge Base Data section above
-2. When comparing players, state the numbers clearly for each metric, then make your comparison
+2. Answer ONLY the specific question asked - don't add extra analysis unless requested
+3. For team performance questions ("How is X doing?"), synthesize the data to give a clear assessment:
+   - Mention relevant statistics (points, clean sheets, player counts)
+   - Provide a brief conclusion about how the team is performing
+4. When comparing players, state the numbers clearly for each metric, then make your comparison
    - Example: "Salah scored 23 goals, Kane scored 30 goals. Kane has more goals."
-3. Make sure your conclusion matches the numbers: if 14 > 9, then the player with 14 has MORE
-4. If data is incomplete or missing, say: "I don't have enough data to answer this question."
-5. Be concise and direct
+5. Make sure your conclusion matches the numbers: if 14 > 9, then the player with 14 has MORE
+6. For fixtures: only mention details that are actually provided (fixture number, kickoff time, season)
+7. For captain recommendations: 
+   - Look at ALL players in the database results
+   - The player with the HIGHEST total points should be recommended
+   - State their position, total points, and why they're the best choice
+8. If data is incomplete or missing, say: "I don't have enough data to answer this question."
+9. Be concise and direct - one or two sentences is often enough
 
 Provide your answer below:"""
 
