@@ -1047,12 +1047,36 @@ class FPLHybridRetriever:
 # Standalone Test
 # ----------------------------
 if __name__ == "__main__":
+    # Initialize hybrid retriever
     hybrid = FPLHybridRetriever()
-    if "model1" not in hybrid.embedding.faiss_indices:
-        hybrid.embedding.rebuild_indices()
-        hybrid.embedding._load_resources()
-
-    query = "Show me the fixtures for liverpool"
-    response = hybrid.retrieve(query, model_choice="model1")
-    print("=== Retrieval Results ===")
-    print(response)
+    
+    # Ensure indices are loaded
+    if not hybrid.embedding.faiss_indices:
+        print("FAISS indices missing, please rebuild first.")
+    
+    # Define your comparison query
+    query = "Erling Haaland goal-scoring performance"
+    top_k = 50  # Top results to compare
+    
+    # Run both embedding models
+    results_model1 = hybrid.embedding.search(query, model_name="model1", top_k=top_k)
+    results_model2 = hybrid.embedding.search(query, model_name="model2", top_k=top_k)
+    
+    # Simple comparison output
+    print("\n=== Embedding Model Comparison ===\n")
+    print(f"Query: {query}\n")
+    
+    print("→ Model 1 (MiniLM) Top Results:")
+    for i, res in enumerate(results_model1, 1):
+        print(f"{i}. {res.get('player_name', res.get('text_representation','N/A'))} | Score: {res['score']:.4f}")
+    
+    print("\n→ Model 2 (MPNet) Top Results:")
+    for i, res in enumerate(results_model2, 1):
+        print(f"{i}. {res.get('player_name', res.get('text_representation','N/A'))} | Score: {res['score']:.4f}")
+    
+    # Optional: high-level metric comparison
+    avg_score_m1 = np.mean([r['score'] for r in results_model1]) if results_model1 else 0
+    avg_score_m2 = np.mean([r['score'] for r in results_model2]) if results_model2 else 0
+    print("\nAverage distance (lower = closer match):")
+    print(f"Model 1: {avg_score_m1:.4f}")
+    print(f"Model 2: {avg_score_m2:.4f}")

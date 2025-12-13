@@ -16,7 +16,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better readability
+# -------------------------------------------------------------------
+# Custom CSS
+# -------------------------------------------------------------------
 st.markdown("""
 <style>
     .reportview-container { margin-top: -2em; }
@@ -32,20 +34,19 @@ st.markdown("""
 # -------------------------------------------------------------------
 @st.cache_resource
 def get_retriever():
-    """Initialize the retriever once and cache it."""
     try:
         return FPLHybridRetriever()
     except Exception as e:
-        st.error(f"Failed to initialize Retriever. Error: {e}")
+        st.error(f"Failed to initialize Retriever: {e}")
         return None
+
 
 @st.cache_resource
 def get_llm_client():
-    """Initialize the LLM Client once and cache it."""
     try:
         return LLMClient()
     except Exception as e:
-        st.error(f"Failed to initialize LLM Client. Error: {e}")
+        st.error(f"Failed to initialize LLM Client: {e}")
         return None
 
 # -------------------------------------------------------------------
@@ -58,11 +59,10 @@ with st.sidebar:
     selected_llm = st.selectbox(
         "Select LLM",
         options=["qwen", "llama", "smollm"],
-        index=0,
         format_func=lambda x: x.upper()
     )
 
-    st.subheader("Embeddings Settings")
+    st.subheader("Embedding Settings")
     selected_embedding = st.selectbox(
         "Select Embedding Model",
         options=["model1", "model2"],
@@ -73,25 +73,27 @@ with st.sidebar:
     st.subheader("Retrieval Settings")
     use_semantic = st.toggle("Enable Semantic Search (Vector)", value=True)
 
-    st.info("Ensure your Neo4j database is running.")
+    st.info("Ensure Neo4j is running.")
 
 # -------------------------------------------------------------------
-# Main Interface
+# Main UI
 # -------------------------------------------------------------------
 st.title("Fantasy Premier League Graph-RAG")
-st.markdown("Ask questions about player stats, fixtures, or get recommendations based on the Knowledge Graph.")
+st.markdown(
+    "Ask questions about player stats, fixtures, or recommendations "
+    "using a transparent Graph-RAG pipeline."
+)
 
 # Suggested Queries
 st.caption("Try asking:")
-col_ex1, col_ex2, col_ex3 = st.columns(3)
-if col_ex1.button("Top scoring defenders under 5m"):
+c1, c2, c3 = st.columns(3)
+if c1.button("Top scoring defenders under 5m"):
     st.session_state.query_input = "Top scoring defenders under 5m"
-if col_ex2.button("Compare Haaland and Salah"):
+if c2.button("Compare Haaland and Salah"):
     st.session_state.query_input = "Compare Haaland and Salah"
-if col_ex3.button("Liverpool fixtures"):
+if c3.button("Liverpool fixtures"):
     st.session_state.query_input = "Show me the next fixtures for Liverpool"
 
-# Input Area
 if "query_input" not in st.session_state:
     st.session_state.query_input = ""
 
@@ -102,16 +104,20 @@ submit_btn = st.button("Analyze & Answer", type="primary")
 # Execution Logic
 # -------------------------------------------------------------------
 if submit_btn and query:
-    # Initialize retriever and LLM client
     retriever = get_retriever()
     llm_client = get_llm_client()
 
     if retriever and llm_client:
         status_container = st.empty()
 
-        # --- STEP 1: RETRIEVAL ---
-        with status_container.status("🔍 Retrieving context from Knowledge Graph...", expanded=True) as status:
+        # ------------------ STEP 1: RETRIEVAL ------------------
+        with status_container.status(
+            "🔍 Retrieving context from Knowledge Graph...",
+            expanded=True
+        ) as status:
+
             start_time = time.time()
+
             retrieval_results = retriever.retrieve(
                 query,
                 use_embeddings=use_semantic,
@@ -120,59 +126,71 @@ if submit_btn and query:
 
             baseline_data = retrieval_results.get("baseline", {})
             semantic_data = retrieval_results.get("semantic_search", {})
+
             intent = baseline_data.get("intent", "Unknown")
             entities = baseline_data.get("entities", {})
 
             status.write(f"**Intent Detected:** `{intent}`")
             status.write(f"**Entities Extracted:** `{entities}`")
-            status.update(label="Context Retrieved!", state="complete", expanded=False)
 
-        # --- STEP 2: DISPLAY KG CONTEXT ---
+            status.update(
+                label="Context Retrieved",
+                state="complete",
+                expanded=False
+            )
+
+        # ------------------ STEP 2: CONTEXT DISPLAY ------------------
         st.divider()
         st.subheader("1. Retrieved Context (Transparency Layer)")
-        st.markdown("Raw facts retrieved from the Knowledge Graph *before* LLM processing.")
+        st.markdown(
+            "Raw information retrieved **before** LLM reasoning."
+        )
 
         col1, col2 = st.columns(2)
 
-        # Structured Database Results
+        # -------- BASELINE (Cypher) --------
         with col1:
-            st.info("**Structured Data (Cypher Query)**")
+            st.info("**Structured Data (Cypher Results)**")
+
             results_list = baseline_data.get("results", [])
+
             if results_list:
                 for res in results_list:
                     data = res.get("data", [])
                     if data:
                         df = pd.DataFrame(data)
-                        st.dataframe(df, width='stretch', hide_index=True)
+                        st.dataframe(df, width="stretch", hide_index=True)
                     else:
-                        st.write("Query executed but returned no data.")
+                        st.write("Query executed but returned no rows.")
             else:
-                st.warning("No direct structured matches found.")
+                st.warning("No baseline matches found.")
 
-        # Semantic Vector Search Results
+        # -------- EMBEDDINGS (FULL OUTPUT) --------
         with col2:
-            st.success("**Vector Search (Semantic Similarity)**")
-            combined_semantic = []
-            for model_results in semantic_data.values():
-                combined_semantic.extend(model_results)
+            st.success("**Vector Search Results (FULL OUTPUT)**")
 
-            if combined_semantic:
-                seen = set()
-                unique_semantic = []
-                for item in combined_semantic:
-                    if item['name'] not in seen:
-                        unique_semantic.append(item)
-                        seen.add(item['name'])
-                for item in unique_semantic[:5]:
-                    with st.expander(f"**{item['name']}** ({item['position']}) - Score: {item.get('score', 0):.3f}"):
-                        st.write(f"Points: {item.get('total_points')} | Price: £{item.get('avg_value')}m")
-                        st.write(f"Form: {item.get('avg_form')}")
+            if semantic_data:
+                for model_name, results in semantic_data.items():
+                    st.markdown(f"### 🔹 Embedding Model: `{model_name}`")
+
+                    if not results:
+                        st.write("No results.")
+                        continue
+
+                    for i, item in enumerate(results, start=1):
+                        with st.expander(
+                            f"{i}. {item.get('name', 'Unknown')} "
+                            f"({item.get('position', 'N/A')}) "
+                            f"| Score: {item.get('score', 0):.4f}"
+                        ):
+                            st.json(item)
             else:
-                st.markdown("*No semantic matches requested or found.*")
+                st.markdown("*Semantic search disabled or no results returned.*")
 
-        # --- STEP 3: LLM GENERATION ---
+        # ------------------ STEP 3: LLM ------------------
         st.divider()
         st.subheader("2. Final Answer")
+
         with st.spinner(f"Generating answer using {selected_llm.upper()}..."):
             llm_response = llm_client.generate_response(
                 user_query=query,
@@ -183,17 +201,25 @@ if submit_btn and query:
 
         if llm_response.get("success"):
             st.markdown(f"### 🤖 {llm_response['answer']}")
-            st.caption(f"---\n**Metrics:** ⏱️ {llm_response['response_time']:.2f}s | 🪙 Tokens: {llm_response['token_count']} | 🧠 Model: {selected_llm.upper()}")
+
+            st.caption(
+                f"⏱️ {llm_response['response_time']:.2f}s | "
+                f"🪙 Tokens: {llm_response['token_count']} | "
+                f"🧠 Model: {selected_llm.upper()}"
+            )
 
             with st.expander("View Full Prompt Sent to LLM"):
-                merged = llm_client.merger.merge_results(baseline_data, semantic_data)
-                context_str = llm_client.prompt_builder.build_full_prompt(
+                merged = llm_client.merger.merge_results(
+                    baseline_data,
+                    semantic_data
+                )
+                full_prompt = llm_client.prompt_builder.build_full_prompt(
                     user_query=query,
                     merged_context=merged
                 )
-                st.text(context_str)
+                st.text(full_prompt)
         else:
-            st.error(f"LLM Generation Failed: {llm_response.get('error')}")
+            st.error(f"LLM failed: {llm_response.get('error')}")
 
 # -------------------------------------------------------------------
 # Footer
