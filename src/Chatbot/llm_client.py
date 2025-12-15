@@ -463,12 +463,18 @@ class ModelEvaluator:
     def generate_summary_table(self, comparison_results: Dict, evaluations: Dict = None) -> str:
         from io import StringIO
         output = StringIO()
-        output.write(f"\n{'Model':<15} {'Time (s)':<12} {'Tokens':<12}\n")
-        output.write("-"*40 + "\n")
+        output.write(f"\n{'Model':<15} {'Time (s)':<12} {'Tokens':<10} {'Chars':<10} {'Words':<10} {'Has Stats':<12}\n")
+        output.write("-"*80 + "\n")
         for model_name in ["llama", "qwen", "smollm"]:
             result = comparison_results.get(model_name, {})
             if not result.get("success"):
                 output.write(f"{model_name.upper():<15} ERROR\n")
                 continue
-            output.write(f"{model_name.upper():<15} {result['response_time']:.2f}{'':<8} {result['token_count']}\n")
+            
+            eval_data = evaluations.get(model_name, {}) if evaluations else {}
+            chars = eval_data.get('answer_length_chars', 0)
+            words = eval_data.get('answer_length_words', 0)
+            has_numbers = "✓" if eval_data.get('contains_numbers') else "✗"
+            
+            output.write(f"{model_name.upper():<15} {result['response_time']:.2f}{'':<8} {result['token_count']:<10} {chars:<10} {words:<10} {has_numbers:<12}\n")
         return output.getvalue()
